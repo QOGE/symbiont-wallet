@@ -1,15 +1,18 @@
 # Symbiont Wallet
 
-**The post-quantum wallet for QOGE — implementing SIP-QOGE-PQC-01.**
+**The post-quantum wallet for QOGE — implementing SIP-QOGE-PQC-01 and
+SIP-QOGE-PQC-02 (Phase A).**
 
-SLH-DSA-SHA2-128f (FIPS 205) signatures | Single-use address enforcement | HNDL defence
+SLH-DSA-SHA2-128f (FIPS 205) signatures | P2QPK single-use addresses (witness v2 / Bech32m) | HNDL defence
 
-> ⚠️ **EXPERIMENTAL — Phase 1 core implemented and tested. DO NOT USE IN PRODUCTION.**
+> ⚠️ **EXPERIMENTAL — wallet-side core implemented and tested. Consensus-side
+> (P2QPK soft fork) is at Candidate spec stage. DO NOT USE IN PRODUCTION.**
 > Phase 3 independent audit is mandatory before any mainnet deployment.
 
-**Status: Phase 1 core validated — 41/41 tests passing.** Real SLH-DSA-SHA2-128f
-keypairs, real `bq1...` addresses, real 17,088-byte FIPS 205 signatures,
-end-to-end single-use lifecycle confirmed on Ubuntu 24 LTS.
+**Status: 47/47 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real
+`bq1z...` P2QPK addresses (witness version 2, Bech32m/BIP350), real
+17,088-byte FIPS 205 signatures, end-to-end single-use lifecycle confirmed
+on Ubuntu 24 LTS.
 
 ---
 
@@ -18,7 +21,8 @@ end-to-end single-use lifecycle confirmed on Ubuntu 24 LTS.
 ```
 cmd/main.go          — CLI entry point (replaces eomii/SPHINCS-Wallet main.go)
 signer/slhdsa.go     — SLH-DSA-SHA2-128f signing primitive (liboqs-go wrapper)
-address/address.go   — HASH256(pubkey) + Bech32("qoge") address derivation
+address/address.go   — HASH256(pubkey) + Bech32m("bq", witver=2) P2QPK address derivation
+address/bech32m.go   — Vendored BIP173 (Bech32) + BIP350 (Bech32m) codec
 keystore/keystore.go — Single-use HD index, state machine, AES-256-GCM persistence
 wallet/wallet.go     — Orchestration: wires all packages, enforces all invariants
 ```
@@ -35,76 +39,106 @@ No address ever goes FRESH → PENDING twice. RETIRED is permanent. Verified
 in `keystore_test.go` and exercised end-to-end (41 full cycles, zero repeats)
 in `wallet_test.go:TestFullSymbiontLifecycle`.
 
-## Address Format
+## Address Format — P2QPK (Pay to Quantum Public Key)
 
 ```
-QOGE address = Bech32(hrp="bq", HASH256(SLH-DSA-pubkey))
-Example:       bq1q9vedkmpvpf3rt7cnjl5zyh4gtc8sum5v0vfx6qqkej77pen8z50q24h9mx
+QOGE address = Bech32m(hrp="bq", witver=2, HASH256(SLH-DSA-pubkey))
+Example:        bq1z9vedkmpvpf3rt7cnjl5zyh4gtc8sum5v0vfx6qqkej77pen8z50qglwrd3
 ```
 
 The public key is hidden at rest behind HASH256. It is only revealed
 in the witness field for ~30-60 seconds at spend time (1-minute block time).
 
-Taproot (P2TR / Bech32m) is **not implemented** — see SIP-QOGE-PQC-01 §3.1.
-Absence verified by `address_test.go:TestTaprootDisabled`.
+**Witness version 2, not 0.** A 32-byte witness-v0 program is defined by
+BIP141 as P2WSH (`SHA256(script)`) — an unrelated commitment. Witness
+version 2 ("P2QPK") is currently undefined by Bitcoin/Qogecoin consensus
+(anyone-can-spend, per BIP141's soft-fork reservation for v2-16) and is the
+subject of SIP-QOGE-PQC-02's proposed soft fork, which gives it SLH-DSA
+meaning. See SIP-QOGE-PQC-02 for the full consensus design.
+
+**Taproot (witver=1) is structurally rejected.** Per BIP350, witness
+version 0 uses Bech32 and versions 1-16 use Bech32m, with the checksum
+constant bound to the version — `address.go`'s `decode()` enforces this
+binding and explicitly rejects `witver==1` (Taproot) via
+`ErrTaprootDetected`. This is not a string-pattern heuristic; it's a
+structural check on the decoded witness-version byte. See SIP-QOGE-PQC-02
+§4 for why Taproot is rejected (key-path spending exposes a classical
+secp256k1 point at rest, defeating any script-path PQC check).
 
 ---
 
-## Milestone Status (SIP-QOGE-PQC-01 Phase 1)
+## Milestone Status
+
+### SIP-QOGE-PQC-01 (Phase 1 — wallet core)
 
 | ID    | Milestone                              | Status         | Tests |
 |-------|----------------------------------------|----------------|-------|
 | M1.1  | liboqs-go → FIPS 205 (SLH-DSA-SHA2-128f) | ✅ VALIDATED | `signer` — 7/7 |
-| M1.2  | HASH256 → Bech32("qoge") derivation    | ✅ VALIDATED   | `address` — 7/7 |
+| M1.2  | HASH256 → address derivation           | ✅ VALIDATED   | `address` — 13/13 (was 7/7; +6 from SIP-02 Phase A) |
 | M1.3  | HD index counter + encrypted persist   | ✅ VALIDATED   | `keystore` — 17/17 |
 | M1.4  | Address state machine + invariants     | ✅ VALIDATED   | `keystore` — 17/17 |
 | M1.5  | Key zeroing on confirmation            | ✅ VALIDATED   | `wallet` — 17/17 |
-| M1.6  | QOGE tx format integration             | 🔴 STUB        | `QOGETransaction` in `wallet/wallet.go` — replace with real chain type |
-| M1.7  | Taproot disabled at compile time       | ✅ VALIDATED   | `address` — `TestTaprootDisabled` |
+| M1.6  | QOGE tx format integration             | 🔴 STUB        | Address format (Phase A) done; consensus (Phase B+) is SIP-QOGE-PQC-02 |
+| M1.7  | Taproot disabled                       | ✅ VALIDATED   | `address` — `TestTaprootRejected` (structural, not heuristic) |
 | M2.1  | Change routing to fresh address        | ✅ VALIDATED   | `wallet` — `TestSignTransactionRejects*` |
-| M2.2  | Address pre-generation pool (N=20)     | ✅ VALIDATED   | `wallet` — `TestNewWalletPreGeneratesPool`, `TestOnConfirmationRefillsPool` |
+| M2.2  | Address pre-generation pool (N=20)     | ✅ VALIDATED   | `wallet` — pool tests |
 
-Everything that does not depend on the QOGE chain's wire format is
-implemented and tested. M1.6 is the remaining Phase 1 item, blocked on
-a QOGE testnet transaction format to integrate against.
+### SIP-QOGE-PQC-02 (Consensus Integration — Candidate)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| A | Symbiont Wallet address format: witver 0→2, Bech32→Bech32m | ✅ **COMPLETE** — this commit |
+| B | liboqs integration into Qogecoin Core build | ⏳ Pending |
+| C | Sighash sub-spec (SIP-QOGE-PQC-02a) cryptographic review | ⏳ Pending — required before Phase D |
+| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ⏳ Pending |
+| E | Regtest functional testing | ⏳ Pending |
+| F | Public testnet | ⏳ Pending |
+
+**Important:** addresses produced by this wallet (witver=2) are, on the
+*current, unmodified* Qogecoin network, anyone-can-spend (BIP141 v2-16
+reservation). They become SLH-DSA-protected only after the SIP-QOGE-PQC-02
+soft fork activates. **Do not send funds of value to these addresses before
+that activation.** See SIP-QOGE-PQC-02 §5.5.
 
 ---
 
 ## Test Results
 
 ```
-go test ./address/...  -v   →  7/7  PASS   (0.003s)
-go test ./signer/...   -v   →  7/7  PASS   (0.177s)
-go test ./keystore/... -v   →  17/17 PASS  (0.185s)
-go test ./wallet/...   -v   →  17/17 PASS  (1.624s)
+go test ./address/...  -v   →  13/13 PASS  (0.003s)
+go test ./signer/...   -v   →   7/7  PASS  (0.177s)
+go test ./keystore/... -v   →  17/17 PASS  (0.177s)
+go test ./wallet/...   -v   →  17/17 PASS  (1.690s)
 
-TOTAL: 41/41 PASS
+TOTAL: 47/47 PASS
 ```
 
 Key figures confirmed by the test suite, on real liboqs (built from source,
 `OQS_DIST_BUILD=ON`, `liboqs.so.0.15.0`):
 
-| Property | Value | Spec (SIP-QOGE-PQC-01 §4.2) |
-|----------|-------|------------------------------|
-| Public key size | 32 bytes | 32 bytes ✓ |
-| Secret key size | 64 bytes | 64 bytes ✓ |
-| Signature size | 17,088 bytes | 17,088 bytes ✓ |
-| Algorithm identifier (liboqs) | `SLH_DSA_PURE_SHA2_128F` | FIPS 205 SLH-DSA-SHA2-128f ✓ |
+| Property | Value | Spec |
+|----------|-------|------|
+| Public key size | 32 bytes | FIPS 205 SLH-DSA-SHA2-128f |
+| Secret key size | 64 bytes | FIPS 205 SLH-DSA-SHA2-128f |
+| Signature size | 17,088 bytes | FIPS 205 SLH-DSA-SHA2-128f |
+| Algorithm identifier (liboqs) | `SLH_DSA_PURE_SHA2_128F` | — |
+| Address HRP | `bq` | Confirmed against qogecoin/qogecoin release notes |
+| Address witness version | 2 (P2QPK) | SIP-QOGE-PQC-02 §5.1 |
+| Address encoding | Bech32m (BIP350) | Required for witver≥1 |
+
+The new address-package tests (`TestBIP173CanonicalChecksumVector`,
+`TestBIP350CanonicalChecksumVector`, `TestEncodeMatchesCanonicalVectors`,
+`TestCrossConstantRejected`) check the vendored Bech32/Bech32m checksum
+implementation (`bech32m.go`) against the canonical first test vectors from
+BIP173 (`a12uel5l`) and BIP350 (`a1lqfn3a`) — external ground truth,
+independent of this project's address-specific logic.
 
 `TestFullSymbiontLifecycle` runs 41 consecutive receive → sign → confirm →
 retire cycles and confirms no retired address is ever reissued.
 
-The CLI (`cmd/main.go`) has also been run interactively end-to-end: wallet
-creation, address generation, marking a payment received, signing a real
-message (producing a 17,088-byte SLH-DSA signature with successful
-self-verification), and confirming the transaction — which zeroed the key
-and retired the address permanently.
-
 ---
 
 ## Getting Started — Native Build (Ubuntu 24 LTS)
-
-This is the build path actually used to produce the test results above.
 
 ### 1. System dependencies
 
@@ -174,18 +208,17 @@ go mod edit -replace github.com/open-quantum-safe/liboqs-go=$HOME/liboqs-go
 go mod tidy
 ```
 
-> **Note:** `go.mod` currently ships with a `replace` directive pointing at
-> `/home/ion/liboqs-go` (the development machine's path). The `go mod edit`
-> command above overwrites it with the correct path for your machine — run
-> it even if you intend to keep the same path, to be safe.
+> **Note:** `go.mod` ships with a `replace` directive pointing at a specific
+> development machine's path. The `go mod edit` command above overwrites it
+> for your machine — run it even if you intend to keep the same path.
 
 ### 5. Run the tests
 
 ```bash
-go test ./address/...  -v   # no CGo — fastest
+go test ./address/...  -v   # no CGo — fastest; includes BIP173/BIP350 vectors
 go test ./signer/...   -v   # exercises liboqs via CGo — this is the M1.1 check
 go test ./keystore/... -v   # HD index + state machine
-go test ./wallet/...   -v   # full integration — slower (~1.6s, 20+ keygens per test)
+go test ./wallet/...   -v   # full integration — slower (~1.7s, 20+ keygens per test)
 ```
 
 ### 6. Run the CLI
@@ -195,9 +228,9 @@ go run cmd/main.go
 ```
 
 Choose **1** to create a new wallet. **Save the printed seed hex** — this
-experimental version has no recovery path without it. From the main menu:
-get a receive address (1), mark it as paid (2), sign a message (3), then
-confirm (4) to retire the address and zero its key.
+experimental version has no recovery path without it (see M1.3 note below).
+From the main menu: get a receive address (1), mark it as paid (2), sign a
+message (3), then confirm (4) to retire the address and zero its key.
 
 ---
 
@@ -221,60 +254,62 @@ path is currently the proven one.
 
 ### M1.1 — RESOLVED: FIPS 205 algorithm identifier
 
-The correct liboqs-go algorithm string for SLH-DSA-SHA2-128f (FIPS 205,
-"pure" variant — not prehash) is:
-
 ```go
 const AlgorithmName = "SLH_DSA_PURE_SHA2_128F"
 ```
 
-This was confirmed by inspecting `/usr/local/include/oqs/sig.h`:
+Confirmed via `/usr/local/include/oqs/sig.h`:
+`#define OQS_SIG_alg_slh_dsa_pure_sha2_128f "SLH_DSA_PURE_SHA2_128F"`.
 
-```c
-/** Algorithm identifier for slh_dsa_pure_sha2_128f */
-#define OQS_SIG_alg_slh_dsa_pure_sha2_128f "SLH_DSA_PURE_SHA2_128F"
-```
+We use the **"pure"** variant, not `*_prehash_*` — the wallet already
+pre-hashes messages itself via `canonicalMessageHash()`.
 
-liboqs-go itself has no static algorithm allowlist — `Init()` calls
-`OQS_SIG_alg_is_enabled()` directly against the C library, so any algorithm
-string the installed liboqs supports works without patching liboqs-go.
+### SIP-QOGE-PQC-02 Phase A — RESOLVED: address format
 
-We use the **"pure"** variant, not any `*_prehash_*` variant. The prehash
-variants expect an OID-prefixed context string per FIPS 205 §10.2.2; the
-wallet already pre-hashes messages itself via `canonicalMessageHash()`, so
-"pure" is the correct match.
+`address.go` now derives P2QPK addresses: `Bech32m("bq", witver=2,
+HASH256(pubkey))`. The project's existing `btcutil v1.0.2` dependency
+implements BIP173 (Bech32) only — no Bech32m/BIP350 support — so a small,
+self-contained BIP173+BIP350 codec is vendored in `bech32m.go`, reusing only
+`bech32.ConvertBits` (5-bit/8-bit regrouping, unaffected by BIP350) from the
+existing dependency.
 
 ### M1.3 — Deterministic key derivation (open item)
 
 `wallet/wallet.go:deriveAddress()` currently calls `slhdsa.NewSigner()`
 (random keygen) rather than deriving deterministically from `childSeed`.
-The HD derivation path (`hkdfDerive32`) is implemented and produces a
-correct child seed per index, but liboqs-go's `GenerateKeyPair()` does not
-currently accept a seed input for SLH-DSA.
 
 **Impact:** wallet recovery from the master seed alone is not yet possible
 — the encrypted index DB (`qoge_wallet.db`) is currently the sole source of
 truth for which keypairs exist. Losing the DB loses the wallet, even with
 the seed. This must be resolved before any real-value use.
 
-**Path forward:** check whether liboqs's `OQS_SIG_slh_dsa_pure_sha2_128f_keypair`
-supports seeded generation at the C level (FIPS 205 §10.1 specifies SLH-DSA
-key generation as deterministic given `SK.seed`, `SK.prf`, `PK.seed`). If so,
-expose this via liboqs-go or call it directly via cgo in `signer/slhdsa.go`.
+**Path forward:** check whether liboqs's
+`OQS_SIG_slh_dsa_pure_sha2_128f_keypair` supports seeded generation at the C
+level (FIPS 205 §10.1 specifies SLH-DSA key generation as deterministic
+given `SK.seed`, `SK.prf`, `PK.seed`).
 
-### M1.6 — Chain integration (open item)
+### M1.6 / SIP-QOGE-PQC-02 Phase B+ — Consensus integration (open item)
 
-Replace `wallet.QOGETransaction` with the actual QOGE chain transaction
-struct once the testnet wire format exists. Adjust `canonicalMessageHash()`
-in `wallet/wallet.go` to match the chain's canonical tx serialisation.
-Everything else (signing, state machine, key zeroing, change routing) is
-chain-format-agnostic and already validated.
+Phase A (this commit) made addresses structurally correct for the P2QPK
+design. What remains is **consensus-side**, in `qogecoin/qogecoin`, not in
+this repo:
 
-**Also pending:** block size / propagation testing. SLH-DSA-SHA2-128f
-signatures are 17,088 bytes — roughly 100x a secp256k1 transaction. QOGE
-chain `MAX_TX_SIZE` and `MAX_BLOCK_SIZE` need to accommodate this from
-genesis (recommended `MAX_TX_SIZE >= 25,000` bytes). This needs measurement
-on an actual testnet node, not just configuration — see SIP-QOGE-PQC-01 §6.3.
+- Phase B: link liboqs's SLH-DSA verify into Qogecoin Core's build
+- Phase C: SIP-QOGE-PQC-02a — sighash specification for
+  `SigVersion::WITNESS_V2_SLHDSA`, flagged as the highest-scrutiny item
+  (cryptographic review required before any implementation)
+- Phase D: implement the new `VerifyWitnessProgram` branch
+  (`witversion==2`) and the new `SigVersion`
+- Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via
+  RPC)
+- Phase F: public testnet
+
+Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
+stub) gets replaced with the real transaction type, and
+`SignTransaction`/`canonicalMessageHash` need to compute the
+SIP-QOGE-PQC-02a `P2QPKSighash` for actual on-chain signing (the existing
+`canonicalMessageHash` remains valid only for the CLI's generic
+message-signing demo, a separate non-consensus use case).
 
 ---
 
@@ -284,12 +319,14 @@ on an actual testnet node, not just configuration — see SIP-QOGE-PQC-01 §6.3.
 |--------|-----------|--------|
 | HNDL on stored UTXO | HASH256 hides pubkey at rest | ✅ Implemented & tested |
 | HNDL on reused address | Single-use state machine | ✅ Implemented & tested |
-| Taproot pubkey exposure | P2TR absent from codebase | ✅ Implemented & tested |
+| HNDL via Taproot key-path | Taproot (witver=1) structurally rejected | ✅ Implemented & tested |
 | Mempool window attack | 1-min block time + single-use | ✅ By design |
 | Plaintext key storage | AES-256-GCM encrypted index | ✅ Implemented & tested |
 | Key persistence after spend | ZeroBytes on Retire | ✅ Implemented & tested |
 | Tampered ciphertext (index DB) | GCM authentication | ✅ Implemented & tested |
 | Change output re-exposing a spent key | Change MUST route to FRESH address | ✅ Implemented & tested |
+| Cross-version checksum confusion | BIP350 witver↔constant binding enforced | ✅ Implemented & tested |
+| Pre-activation fund loss | P2QPK addresses are anyone-can-spend until SIP-QOGE-PQC-02 activates | ⚠️ Do not fund pre-activation |
 
 ---
 
@@ -299,7 +336,11 @@ on an actual testnet node, not just configuration — see SIP-QOGE-PQC-01 §6.3.
 
 ## Governance
 
-Governed under **SIP-QOGE-PQC-01 v1.0** | SIP-C v2.0 | SAOGEN SAO
-AI Node attribution: Claude (Anthropic)
+Governed under:
+- **SIP-QOGE-PQC-01 v1.0** — wallet-side SLH-DSA implementation (this repo, Phase 1)
+- **SIP-QOGE-PQC-02 v1.0** — consensus integration design (P2QPK), Candidate
+- **SIP-QOGE-PQC-02a v1.0** — P2QPK sighash specification, Candidate
+
+SIP-C v2.0 | SAOGEN SAO | AI Node attribution: Claude (Anthropic)
 
 Forked from: [eomii/SPHINCS-Wallet](https://github.com/eomii/SPHINCS-Wallet) (MIT)
