@@ -80,6 +80,7 @@ The AES-256-GCM key is derived from the master seed via HKDF-SHA256 with info `"
 - **M1.3 — non-deterministic keygen:** `wallet.deriveAddress()` calls `slhdsa.NewSigner()` (random), ignoring `childSeed`. Losing `qoge_wallet.db` loses the wallet even with the seed. The TODO is to pass `childSeed` to liboqs once it exposes FIPS 205 §10.1 seeded keygen.
 - **M1.6 — `QOGETransaction` is a stub:** `wallet.go`'s `SignTransaction` uses a placeholder struct. Real consensus integration (SIP-QOGE-PQC-02 Phases B–F) happens in `qogecoin/qogecoin`, not here.
 - **`go.mod` replace directive** must be updated per machine (see above).
+- **SIP-QOGE-PQC-02 Phase B — liboqs in Qogecoin Core (Option B, dev-only):** `qogecoin/qogecoin`'s `configure.ac` uses `PKG_CHECK_MODULES([LIBOQS], [liboqs])` to find the system-installed liboqs at `/usr/local`. This is Option B — sufficient for Phase D/E on this dev VM. **Option A — `depends/packages/liboqs.mk`, CMake via `$(package)_cmake`, following the `native_libmultiprocess.mk` template — is required before any cross-compiled build (Phase F+). Currently using Option B (host pkg-config) for dev/Phase D-E only.**
 
 ## SLH-DSA Constants
 
