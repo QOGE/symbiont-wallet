@@ -1,0 +1,16 @@
+# Wallet databases - NEVER commit. Contains encrypted private key material.
+*.db
+qoge_wallet.db
+
+# Build artifacts
+*.exe
+*.test
+*.out
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
