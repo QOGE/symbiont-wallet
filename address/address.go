@@ -3,7 +3,7 @@
 // Derivation scheme (SIP-QOGE-PQC-01, Section 5.2):
 //
 //	hash    = SHA256(SHA256(pubkey))   // HASH256 — same as Bitcoin P2PKH
-//	address = Bech32(hrp="qoge", hash) // custom HRP, witness version 0
+//	address = Bech32(hrp="bq", hash) // custom HRP, witness version 0
 //
 // The HASH256 layer keeps the public key hidden behind a hash at rest.
 // The public key is only revealed in the witness field at spend time.
@@ -25,8 +25,8 @@ import (
 )
 
 // HRP is the human-readable part for QOGE Bech32 addresses.
-// All QOGE addresses start with "qoge1".
-const HRP = "qoge"
+// All QOGE addresses start with "bq1".
+const HRP = "bq"
 
 // WitnessVersion is the SegWit witness version (0 = P2WPKH equivalent).
 const WitnessVersion = 0
@@ -154,7 +154,7 @@ func decode(addr string) ([]byte, error) {
 	return decoded, nil
 }
 
-// isBech32m does a quick heuristic check for Taproot (bc1p / qoge1p-style).
+// isBech32m does a quick heuristic check for Taproot (bc1p / bq1p-style).
 // Full Bech32m detection is not needed — we just want a helpful error.
 func isBech32m(addr string) bool {
 	if len(addr) < 5 {
@@ -163,7 +163,7 @@ func isBech32m(addr string) bool {
 	// Bech32m addresses use a different checksum constant (0x2bc830a3).
 	// A simpler heuristic: Taproot witness version is 1, encoded as 'p'
 	// in Bech32's charset after the separator.
-	// For QOGE this would appear as "qoge1p...".
+	// For QOGE this would appear as "bq1p...".
 	for i, c := range addr {
 		if c == '1' && i+1 < len(addr) {
 			return addr[i+1] == 'p'

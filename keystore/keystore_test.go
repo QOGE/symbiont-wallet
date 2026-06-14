@@ -104,7 +104,7 @@ func TestGenerateAddressBasic(t *testing.T) {
 	if addr == "" {
 		t.Fatal("GenerateAddress returned empty address")
 	}
-	if addr[:5] != "qoge1" {
+	if addr[:3] != "bq1" {
 		t.Errorf("address should start with 'qoge1', got: %s", addr)
 	}
 

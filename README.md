@@ -8,7 +8,7 @@ SLH-DSA-SHA2-128f (FIPS 205) signatures | Single-use address enforcement | HNDL 
 > Phase 3 independent audit is mandatory before any mainnet deployment.
 
 **Status: Phase 1 core validated — 41/41 tests passing.** Real SLH-DSA-SHA2-128f
-keypairs, real `qoge1...` addresses, real 17,088-byte FIPS 205 signatures,
+keypairs, real `bq1...` addresses, real 17,088-byte FIPS 205 signatures,
 end-to-end single-use lifecycle confirmed on Ubuntu 24 LTS.
 
 ---
@@ -38,8 +38,8 @@ in `wallet_test.go:TestFullSymbiontLifecycle`.
 ## Address Format
 
 ```
-QOGE address = Bech32(hrp="qoge", HASH256(SLH-DSA-pubkey))
-Example:       qoge1q7syrzy8v5l2zh8np2fhknyqq55xfecj6h7zy7tn8gjr7hzayl9msfdrqpd
+QOGE address = Bech32(hrp="bq", HASH256(SLH-DSA-pubkey))
+Example:       bq1q9vedkmpvpf3rt7cnjl5zyh4gtc8sum5v0vfx6qqkej77pen8z50q24h9mx
 ```
 
 The public key is hidden at rest behind HASH256. It is only revealed

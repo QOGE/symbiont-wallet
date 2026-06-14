@@ -34,8 +34,8 @@ func TestFromPublicKeyProducesQogePrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromPublicKey failed: %v", err)
 	}
-	if !strings.HasPrefix(addr, "qoge1") {
-		t.Errorf("address should start with 'qoge1', got: %s", addr)
+	if !strings.HasPrefix(addr, "bq1") {
+		t.Errorf("address should start with 'bq1', got: %s", addr)
 	}
 	t.Logf("Derived address: %s", addr)
 }
@@ -95,7 +95,7 @@ func TestValidateAddressRejectsGarbage(t *testing.T) {
 		"",
 		"notanaddress",
 		"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", // Bitcoin address, wrong HRP
-		"qoge1invalidchecksum",
+		"bq1invalidchecksum",
 	}
 	for _, c := range cases {
 		if err := ValidateAddress(c); err == nil {
@@ -107,9 +107,9 @@ func TestValidateAddressRejectsGarbage(t *testing.T) {
 // TestTaprootDisabled verifies that any Bech32m (Taproot-style) address
 // is rejected. This is a security invariant — see SIP-QOGE-PQC-01 §3.1.
 func TestTaprootDisabled(t *testing.T) {
-	// Construct a fake "qoge1p..." address (Taproot-style).
+	// Construct a fake "bq1p..." address (Taproot-style).
 	// We just check the error path — the actual Bech32m checksum need not be valid.
-	taprootLike := "qoge1pzg2yxpr" // starts with qoge1p — Taproot pattern
+	taprootLike := "bq1pzg2yxpr" // starts with bq1p — Taproot pattern
 	err := ValidateAddress(taprootLike)
 	if err == nil {
 		t.Error("Taproot-style address should be rejected but was accepted")
