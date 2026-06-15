@@ -180,11 +180,24 @@ TaggedHash("P2QPKSighash";
 )
 ```
 
-Expected hash: **TBD — compute with `TaggedHash("P2QPKSighash", preimage)`**
-before Phase D begins. This is the value a cryptographic reviewer verifies
-against §3 independently. Note: the BIP341 TapSighash for this same input
-(hash_type 0x03, not 0x01) is `2514a6272f85cfa0f45eb907fcb0d121b808ed37c6ea160a5a9046ed5526d555`
-— the different tag and hash_type guarantee no collision.
+**P2QPKSighash (input 0)**:
+```
+8a17f83ed68457d5469f4bbcfc68ddaeaa70739522c1b6fb76685ba7b2008c38
+```
+
+**Cross-validation**: before computing the P2QPKSighash, the same Python
+`tagged_hash` implementation reproduced the known BIP341 TapSighash for this
+same input (hash_type 0x03, SIGHASH_SINGLE, key-path, no annex) exactly:
+```
+TaggedHash("TapSighash", sigMsg) = 2514a6272f85cfa0f45eb907fcb0d121b808ed37c6ea160a5a9046ed5526d555  ✓
+```
+matching the `bip341_wallet_vectors.json` reference value byte-for-byte.
+This validates the `TaggedHash(tag, msg) = SHA256(SHA256(tag)||SHA256(tag)||msg)` 
+implementation and the LE byte-ordering of all fields before the P2QPKSighash
+computation was run. The two hashes differ in tag string, hash_type byte
+(0x03 vs 0x01), field set (no `m_outputs_single_hash` in TapSighash for
+SIGHASH_SINGLE; no `spend_type`/`sha_single_output` in P2QPKSighash), and
+preimage length (175 vs 174 bytes) — confirming domain separation.
 
 ### Open Item 3 — `HASHER_P2QPKSIGHASH` precomputation ✅ RESOLVED
 
