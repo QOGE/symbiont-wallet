@@ -5,11 +5,14 @@
 > **normative construction and open items only** — see the full docx for
 > threat model, governance tables, and rationale prose.
 >
-> **Status: CANDIDATE.** Per SIP-QOGE-PQC-02 §9, cryptographic review of this
-> specification is a hard gate before Phase D (any C++ implementation of the
-> `VerifyWitnessProgram` P2QPK branch or the sighash function itself).
-> **Phase C = working through the open items below against the real
-> qogecoin/qogecoin source. Phase C is NOT "implement the sighash."**
+> **Status: CANDIDATE — Phase C complete.** All open items resolved against
+> the real `qogecoin/qogecoin` source. P2QPKSighash test vector computed and
+> cross-validated against the BIP341 TapSighash reference (`8a17f83e...`,
+> see Open Item 2). **Phase D blocked pending independent cryptographic review
+> of §3 per SIP-QOGE-PQC-02 §9.** Do not begin C++ implementation of
+> `SignatureHashP2QPK` or the `VerifyWitnessProgram` witver==2 branch until
+> that review is complete. The review gate is not a formality — it is the
+> point of having it.
 
 ## 1. SigVersion::WITNESS_V2_SLHDSA = 4
 
