@@ -37,11 +37,34 @@ sighash needs:
 - `m_spent_scripts_single_hash`
 - `m_sequences_single_hash`
 - `m_outputs_single_hash`
-- `m_bip341_taproot_ready` (readiness gate — **see Open Item 1**)
+- ~~`m_bip341_taproot_ready` (readiness gate — **see Open Item 1**)~~
+  **[CORRECTED — Open Item 1 resolved]** `m_bip341_taproot_ready` is gated
+  on witver==1 (Taproot) specifically, not witver≥1. See §6 Open Item 1.
 - `m_spent_outputs` / `m_spent_outputs_ready`
 
 **Claim: SIP-QOGE-PQC-02a introduces ZERO new fields to
-`PrecomputedTransactionData`.** This claim is falsifiable by Open Item 1.
+`PrecomputedTransactionData`.** ~~This claim is falsifiable by Open Item 1.~~
+
+**[CORRECTED — Open Item 1 resolved]** The "zero new fields" claim
+**survives** with one caveat: `Init()`'s witver detection trigger must be
+extended. Specifically:
+
+- `m_prevouts_single_hash`, `m_sequences_single_hash`, `m_outputs_single_hash`
+  **are** precomputed for P2QPK spends: witver==2 falls into the
+  `uses_bip143_segwit = true` branch (`Init()` line 1420–1424), which
+  gates the shared-computation block at line 1430.
+- `m_spent_amounts_single_hash`, `m_spent_scripts_single_hash` are **NOT**
+  precomputed for P2QPK spends: they sit inside the `uses_bip341_taproot`
+  block (lines 1442–1445), which is only set when `scriptPubKey[0] == OP_1`
+  (witver==1). witver==2 (`OP_2`) does not trigger it.
+
+**Required fix (1 line in Init()):** extend the detection condition at
+`interpreter.cpp:1414` from `scriptPubKey[0] == OP_1` to
+`scriptPubKey[0] == OP_1 || scriptPubKey[0] == OP_2`, or introduce a
+parallel `uses_p2qpk` flag that also triggers the spent-amounts/scripts
+computation. Either way: no new fields in the struct, one new trigger
+condition. This does **not** meet the §8 rejection criterion ("structural
+precompute change").
 
 ## 3. Normative construction (SIGHASH_ALL only, v1)
 
@@ -103,40 +126,85 @@ Deliberately fewer parameters than `SignatureHashSchnorr`: no
 
 ## 6. Open Items — THIS IS PHASE C
 
-### Open Item 1 — `m_bip341_taproot_ready` gating (HIGHEST PRIORITY)
+### Open Item 1 — `m_bip341_taproot_ready` gating ✅ RESOLVED
 
-**Question**: is `m_bip341_taproot_ready` (and the precompute that sets it)
-keyed on "any witver>=1 spend" or specifically "witver==1 (Taproot)"?
+**Answer**: gated on **witver==1 specifically** (Taproot), not witver≥1.
 
-**Why it matters**: Section 2's "zero new precompute" claim depends on this
-precompute already running for witver==2 (P2QPK) spends. If it's
-Taproot-specific (witver==1 only), the precompute *trigger* needs extending
-to witver==2 — a small but real change, and the one thing that could
-invalidate this spec's core simplification claim.
+`Init()` (`interpreter.cpp:1397–1447`) scans inputs and sets
+`uses_bip341_taproot = true` only when `scriptPubKey[0] == OP_1` (witver==1)
+and the scriptPubKey is exactly 34 bytes. witver==2 (`OP_2`) falls into the
+`else` branch, setting `uses_bip143_segwit = true`.
 
-**How to check**: in `~/qogecoin`, find where `m_bip341_taproot_ready` is
-set (likely in `PrecomputedTransactionData`'s constructor or an `Init`-style
-method in `src/script/interpreter.cpp` or `.h`). Read the condition under
-which it's computed. Report back: is it gated on `witversion == 1`,
-`witversion >= 1`, "any segwit v1+ output in the tx", or something else?
+**Consequence for §2**: see §2 correction above. Three of five required fields
+are already computed for P2QPK spends; two (`m_spent_amounts_single_hash`,
+`m_spent_scripts_single_hash`) are not. Fix: 1-line extension to the
+`OP_1`→`OP_1 || OP_2` detection condition at `interpreter.cpp:1414`.
+Not a rejection criterion.
 
-**Rejection criterion** (SIP-QOGE-PQC-02a §8): if this cannot be extended to
-witver==2 without a structural precompute change, this SIP needs revision.
+**Also found**: `VerifyWitnessProgram` (`interpreter.cpp:1864`) dispatches on
+`witversion == 0` (P2WSH/P2WPKH), then `witversion == 1 && size == 34 && !is_p2sh`
+(Taproot). witver==2 falls through both — currently anyone-can-spend per
+BIP141 v2-16 reservation. Phase D adds `else if (witversion == 2 && ...)`.
 
-### Open Item 2 — Test vectors
+### Open Item 2 — Test vectors ✅ RESOLVED (preimage specified; hash needs code run)
 
-Produce a reference set of `(transaction, input index) -> expected
-P2QPKSighash` tuples, derivable from Section 3 plus a BIP341 test-vector
-transaction (same cache fields, different tag + reduced field set),
-**independent of any SLH-DSA signing**. These are the deliverable a
-cryptographic reviewer checks Section 3 against — before any C++ exists.
+Reference transaction: BIP341 wallet vectors
+(`src/test/data/bip341_wallet_vectors.json`, `keyPathSpending[0]`).
+Intermediary hashes (all independently verifiable from `rawUnsignedTx` +
+`utxosSpent`):
 
-### Open Item 3 — `HASHER_P2QPKSIGHASH` precomputation
+```
+hashPrevouts    = e3b33bb4ef3a52ad1fffb555c0d82828eb22737036eaeb02a235d82b909c4c3f
+hashAmounts     = 58a6964a4f5f8f0b642ded0a8a553be7622a719da71d1f5befcefcdee8e0fde6
+hashScriptPubkeys = 23ad0f61ad2bca5ba6a7693f50fce988e17c3780bf2b1e720cfbb38fbdd52e21
+hashSequences   = 18959c7221ab5ce9e26c3cd67b22c24f8baa54bac281d8e6b05e400e6c3a957e
+hashOutputs     = a2e6dab7c1f0dcd297c8d61647fd17d821541ea69c3cc37dcbad7f90d4eb4bc5
+nVersion        = 02000000  (LE32)
+nLockTime       = 0065cd1d  (LE32 = 500,000,000)
+```
 
-Locate where `HASHER_TAPSIGHASH` is defined (likely a static
-`CHashWriter`/tagged-hash midstate constant). Replicate the pattern with tag
-`"P2QPKSighash"`. Mechanical once located — this is "find the pattern and
-copy it with a different string," not new design.
+**P2QPKSighash preimage for input 0** (per §3 construction):
+
+```
+TaggedHash("P2QPKSighash";
+    00                                                                // epoch
+    01                                                                // hash_type SIGHASH_ALL
+    02000000                                                          // nVersion
+    0065cd1d                                                          // nLockTime
+    e3b33bb4ef3a52ad1fffb555c0d82828eb22737036eaeb02a235d82b909c4c3f // m_prevouts_single_hash
+    58a6964a4f5f8f0b642ded0a8a553be7622a719da71d1f5befcefcdee8e0fde6 // m_spent_amounts_single_hash
+    23ad0f61ad2bca5ba6a7693f50fce988e17c3780bf2b1e720cfbb38fbdd52e21 // m_spent_scripts_single_hash
+    18959c7221ab5ce9e26c3cd67b22c24f8baa54bac281d8e6b05e400e6c3a957e // m_sequences_single_hash
+    a2e6dab7c1f0dcd297c8d61647fd17d821541ea69c3cc37dcbad7f90d4eb4bc5 // m_outputs_single_hash
+    00000000                                                          // in_pos (LE32)
+)
+```
+
+Expected hash: **TBD — compute with `TaggedHash("P2QPKSighash", preimage)`**
+before Phase D begins. This is the value a cryptographic reviewer verifies
+against §3 independently. Note: the BIP341 TapSighash for this same input
+(hash_type 0x03, not 0x01) is `2514a6272f85cfa0f45eb907fcb0d121b808ed37c6ea160a5a9046ed5526d555`
+— the different tag and hash_type guarantee no collision.
+
+### Open Item 3 — `HASHER_P2QPKSIGHASH` precomputation ✅ RESOLVED
+
+`HASHER_TAPSIGHASH` is defined at `interpreter.cpp:1461`:
+
+```cpp
+const CHashWriter HASHER_TAPSIGHASH = TaggedHash("TapSighash");
+const CHashWriter HASHER_TAPLEAF    = TaggedHash("TapLeaf");
+const CHashWriter HASHER_TAPBRANCH  = TaggedHash("TapBranch");
+```
+
+Phase D adds immediately after line 1463:
+
+```cpp
+const CHashWriter HASHER_P2QPKSIGHASH = TaggedHash("P2QPKSighash");
+```
+
+`HASHER_P2QPKSIGHASH` is then used as the base writer in
+`SignatureHashP2QPK`, replacing `HASHER_TAPSIGHASH` in the Schnorr pattern.
+Mechanical — no new design.
 
 ### Open Item 4 — Symbiont Wallet cross-check
 
@@ -150,7 +218,9 @@ the two when M1.6 resumes.
 
 ---
 
-**Phase C exit criteria**: Open Items 1 and 3 answered against real source
-(grep + read, like Phase B.1's secp256k1/CMake investigation); Open Item 2
-test vectors drafted. Only then does Phase D (C++ implementation of
-`SignatureHashP2QPK` and the `VerifyWitnessProgram` witver==2 branch) begin.
+**Phase C exit criteria**: ✅ Open Items 1 and 3 answered against real source.
+✅ Open Item 2 test vector preimage specified (hash value TBD — compute before
+Phase D). Open Item 4 unchanged (Symbiont Wallet M1.6, not a Phase C gate).
+**Phase D (C++ implementation of `SignatureHashP2QPK` and the
+`VerifyWitnessProgram` witver==2 branch) may now begin**, pending Open Item 2
+hash computation and cryptographic review of §3.
