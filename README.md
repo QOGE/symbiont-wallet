@@ -88,9 +88,9 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | Phase | Description | Status |
 |-------|-------------|--------|
 | A | Symbiont Wallet address format: witver 0→2, Bech32→Bech32m | ✅ **COMPLETE** — this commit |
-| B | liboqs integration into Qogecoin Core build | ⏳ Pending |
-| C | Sighash sub-spec (SIP-QOGE-PQC-02a) cryptographic review | ⏳ Pending — required before Phase D |
-| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ⏳ Pending |
+| B | liboqs integration into Qogecoin Core build | ✅ **COMPLETE** — liboqs linked via `PKG_CHECK_MODULES([LIBOQS], [liboqs])` (Option B, host pkg-config, dev/Phase D-E only); committed locally in `qogecoin/qogecoin` as `8550582`, not pushed (fork+PR step deferred per §9) |
+| C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved against real source; P2QPKSighash test vector `8a17f83e...` computed and cross-validated against the BIP341 TapSighash reference; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
+| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ⏳ **BLOCKED** — pending independent cryptographic review of SIP-QOGE-PQC-02a §3 per SIP-QOGE-PQC-02 §9 (hard gate; not just "Pending") |
 | E | Regtest functional testing | ⏳ Pending |
 | F | Public testnet | ⏳ Pending |
 
@@ -288,20 +288,26 @@ the seed. This must be resolved before any real-value use.
 level (FIPS 205 §10.1 specifies SLH-DSA key generation as deterministic
 given `SK.seed`, `SK.prf`, `PK.seed`).
 
-### M1.6 / SIP-QOGE-PQC-02 Phase B+ — Consensus integration (open item)
+### M1.6 / SIP-QOGE-PQC-02 Phase B+ — Consensus integration
 
 Phase A (this commit) made addresses structurally correct for the P2QPK
-design. What remains is **consensus-side**, in `qogecoin/qogecoin`, not in
-this repo:
+design. Consensus-side work is in `qogecoin/qogecoin`, not in this repo.
+See [`docs/sips/SIP-QOGE-PQC-02.md`](docs/sips/SIP%20QOGE%20PQC%2002%20P2QPK.md)
+and [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md)
+for full normative detail.
 
-- Phase B: link liboqs's SLH-DSA verify into Qogecoin Core's build
-- Phase C: SIP-QOGE-PQC-02a — sighash specification for
-  `SigVersion::WITNESS_V2_SLHDSA`, flagged as the highest-scrutiny item
-  (cryptographic review required before any implementation)
-- Phase D: implement the new `VerifyWitnessProgram` branch
-  (`witversion==2`) and the new `SigVersion`
-- Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via
-  RPC)
+- **Phase B ✅ COMPLETE:** `PKG_CHECK_MODULES([LIBOQS], [liboqs])` added to
+  `configure.ac`; `LIBOQS_CFLAGS`/`LIBOQS_LIBS` wired into
+  `libqogecoin_consensus_a_CPPFLAGS` and `qogecoin_bin_ldadd`. Option B
+  (host pkg-config, `/usr/local`); Option A (`depends/packages/liboqs.mk`)
+  required for Phase F cross-compiled builds.
+- **Phase C ✅ COMPLETE:** `m_bip341_taproot_ready` confirmed witver==1-specific;
+  `Init()` extension identified (1-line `OP_1→OP_1||OP_2`); `HASHER_P2QPKSIGHASH`
+  location confirmed (`interpreter.cpp:1464`); P2QPKSighash test vector
+  `8a17f83e...` computed and cross-validated. See `docs/sips/SIP-QOGE-PQC-02a.md`.
+- **Phase D ⏳ BLOCKED:** independent cryptographic review of SIP-QOGE-PQC-02a §3
+  required before any C++ implementation (SIP-QOGE-PQC-02 §9 hard gate).
+- Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via RPC)
 - Phase F: public testnet
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
@@ -333,6 +339,12 @@ message-signing demo, a separate non-consensus use case).
 ## Repository
 
 [github.com/QOGE/symbiont-wallet](https://github.com/QOGE/symbiont-wallet)
+
+## Documentation
+
+- [`docs/sips/SIP-QOGE-PQC-02.md`](docs/sips/SIP%20QOGE%20PQC%2002%20P2QPK.md) — condensed normative reference for SIP-02 (P2QPK consensus design), for use during Phase C/D implementation work
+- [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) — condensed normative reference for SIP-02a (P2QPK sighash spec), including Phase C source findings and the `P2QPKSighash` test vector
+- [`CLAUDE.md`](CLAUDE.md) — guidance for Claude Code sessions working in this repository (build prerequisites, architecture, open items)
 
 ## Governance
 
