@@ -136,11 +136,11 @@ introduce one without re-justifying against this table.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | A | Wallet address format (witver 0->2, Bech32m) | ✅ DONE (symbiont-wallet) |
-| B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only); Option A (`depends/packages/liboqs.mk`, CMake) deferred to Phase F+, see CLAUDE.md |
-| C | Sighash sub-spec review (SIP-QOGE-PQC-02a open items) | ⏳ CURRENT |
-| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ⏳ Blocked on C |
-| E | Regtest functional testing | ⏳ Blocked on D |
-| F | Public testnet | ⏳ Blocked on E |
+| B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only); Option A (`depends/packages/liboqs.mk`, CMake) deferred to Phase F+, see CLAUDE.md and §7-C |
+| C | Sighash sub-spec review (SIP-QOGE-PQC-02a open items) | ✅ DONE — all open items resolved; P2QPKSighash `8a17f83e...` independently reviewed (GPT-5.5, PASS); Phase D safeguards A-E folded into spec as §7 |
+| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ⏳ NOT YET STARTED — review gate cleared; safeguards A-E (§7) are normative; implementation may begin next session |
+| E | Regtest functional testing | ⏳ Pending |
+| F | Public testnet | ⏳ Pending |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
 

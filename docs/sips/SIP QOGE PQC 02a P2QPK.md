@@ -5,14 +5,16 @@
 > **normative construction and open items only** — see the full docx for
 > threat model, governance tables, and rationale prose.
 >
-> **Status: CANDIDATE — Phase C complete.** All open items resolved against
-> the real `qogecoin/qogecoin` source. P2QPKSighash test vector computed and
-> cross-validated against the BIP341 TapSighash reference (`8a17f83e...`,
-> see Open Item 2). **Phase D blocked pending independent cryptographic review
-> of §3 per SIP-QOGE-PQC-02 §9.** Do not begin C++ implementation of
-> `SignatureHashP2QPK` or the `VerifyWitnessProgram` witver==2 branch until
-> that review is complete. The review gate is not a formality — it is the
-> point of having it.
+> **Status: CANDIDATE — Phase C complete. Review gate cleared.** All open
+> items resolved against the real `qogecoin/qogecoin` source. P2QPKSighash
+> test vector `8a17f83e...` computed, cross-validated against the BIP341
+> TapSighash reference, and **independently recomputed** by GPT-5.5 Thinking
+> (20 June 2026, `docs/sips/QOGE_P2QPK_PQC_Independent_Review.md`) — PASS,
+> no fatal sighash flaw found. Five required Phase D safeguards (§7) have been
+> folded into this spec as normative requirements. **Phase D may begin in a
+> future session.** A human Bitcoin/PQC cryptography audit remains mandatory
+> before mainnet activation (SIP-QOGE-PQC-02 §9 — AI review is not a
+> substitute for human review).
 
 ## 1. SigVersion::WITNESS_V2_SLHDSA = 4
 
@@ -149,7 +151,7 @@ Not a rejection criterion.
 (Taproot). witver==2 falls through both — currently anyone-can-spend per
 BIP141 v2-16 reservation. Phase D adds `else if (witversion == 2 && ...)`.
 
-### Open Item 2 — Test vectors ✅ RESOLVED (preimage specified; hash needs code run)
+### Open Item 2 — Test vectors ✅ FULLY RESOLVED
 
 Reference transaction: BIP341 wallet vectors
 (`src/test/data/bip341_wallet_vectors.json`, `keyPathSpending[0]`).
@@ -187,6 +189,12 @@ TaggedHash("P2QPKSighash";
 ```
 8a17f83ed68457d5469f4bbcfc68ddaeaa70739522c1b6fb76685ba7b2008c38
 ```
+
+**Independent recomputation**: the GPT-5.5 Thinking review (20 June 2026,
+`docs/sips/QOGE_P2QPK_PQC_Independent_Review.md`) independently recomputed
+this value from the raw preimage using `SHA256(SHA256(tag)||SHA256(tag)||preimage)`
+with `tag = "P2QPKSighash"` and confirmed it matches exactly. Open Item 2 is
+**fully resolved** — preimage specified and hash independently verified.
 
 **Cross-validation**: before computing the P2QPKSighash, the same Python
 `tagged_hash` implementation reproduced the known BIP341 TapSighash for this
@@ -232,11 +240,117 @@ signing. `canonicalMessageHash` remains valid only for the CLI's generic
 message-signing demo — a separate, non-consensus use case. Do not conflate
 the two when M1.6 resumes.
 
+## 7. Phase D Normative Requirements (from independent review)
+
+Source: GPT-5.5 Thinking independent review, 20 June 2026
+(`docs/sips/QOGE_P2QPK_PQC_Independent_Review.md`, §Required Phase D Safeguards).
+These are **blocking consensus rules**, not prose suggestions. Each must be
+satisfied before the Phase D C++ implementation is considered complete.
+
+### 7-A. Exact signature and public key length validation
+
+Consensus MUST enforce exact lengths before invoking liboqs:
+
+```
+pubkey.size()    == 32       bytes   (SLHDSA_PK_LEN)
+signature.size() == 17,088   bytes   (SLHDSA_SIG_LEN — exact, not ≤ max)
+```
+
+The `VerifyWitnessProgram` pseudocode in §3.3 of SIP-QOGE-PQC-02 currently
+uses `sig.size() > SLHDSA_SIG_MAX_LEN` — this is **incorrect for consensus**
+and must be changed to `sig.size() != SLHDSA_SIG_LEN` (exact equality).
+No appended sighash byte is permitted. Rationale: exact validation keeps
+consensus canonical and avoids relying on downstream library rejection for
+malformed lengths.
+
+### 7-B. Exact SLH-DSA mode must be normative
+
+The implementation MUST specify:
+
+```
+Algorithm:        SLH-DSA-SHA2-128f
+Mode:             pure SLH-DSA (not pre-hash)
+Context string:   empty ("")
+Message:          exactly the 32-byte P2QPKSighash output
+Signature length: exactly 17,088 bytes
+Public key:       exactly 32 bytes
+```
+
+**Reference**: RFC 9814 §3 distinguishes pure and pre-hash SLH-DSA and
+specifies that the context string is included in the signed message. The
+context must be empty; the message must be the 32-byte P2QPKSighash
+exactly — not a re-hash of it or a prefixed encoding.
+
+liboqs API path to use: `OQS_SIG_slh_dsa_pure_sha2_128f_verify` (or the
+generic `OQS_SIG` struct with `OQS_SIG_alg_slh_dsa_pure_sha2_128f`). Using
+a `*_prehash_*` variant is a consensus-breaking error.
+
+### 7-C. liboqs must be pinned/reproducible for consensus builds
+
+Phase B's Option B (host `pkg-config`, dynamic system liboqs) is explicitly
+**dev/Phase D-E only**. It must NOT become the consensus build path.
+
+**Required property for any consensus merge**: liboqs must be integrated via
+Option A — `depends/packages/liboqs.mk`, CMake via `$(package)_cmake`,
+following the `native_libmultiprocess.mk` template — providing a pinned,
+version-locked, reproducible build. Different distro liboqs packages or
+compile-time flags across node operators risk consensus divergence if library
+behavior changes.
+
+**Implication for roadmap**: Option A was previously scoped to Phase F+ (cross-
+compiled release builds). The independent review's finding elevates it: Option A
+should be completed before any consensus code is merged for relay/mining, not
+just before cross-platform release. Review with SAOGEN before finalizing the
+Phase D/E/F ordering.
+
+### 7-D. Precompute trigger must be tested
+
+Extending `Init()` from `scriptPubKey[0] == OP_1` to
+`scriptPubKey[0] == OP_1 || scriptPubKey[0] == OP_2` (or introducing a
+`uses_p2qpk` flag) is necessary but not sufficient. Phase D/E MUST include
+tests for:
+
+1. Single P2QPK input — `m_spent_amounts_single_hash` and
+   `m_spent_scripts_single_hash` correctly computed
+2. Multiple P2QPK inputs — all per-input cache fields populated
+3. Mixed legacy + P2QPK inputs in the same transaction
+4. Mixed Taproot + P2QPK inputs (if Taproot exists in QOGE)
+5. **Missing spent-output data must cause a hard failure** — not silently
+   hash zeroes. This is the critical case: a missing-data path that produces
+   an all-zero hash and a verifiable signature would be a consensus exploit.
+
+`MissingDataBehavior::FAIL_WITH_ERROR` must be enforced in
+`SignatureHashP2QPK` when `!cache.m_bip341_taproot_ready` (or the P2QPK
+equivalent readiness gate) — analogous to the Schnorr path.
+
+### 7-E. Mempool relay and standardness testing is distinct from block validation
+
+Phase E functional testing MUST explicitly verify:
+
+```
+1. Construct a standard P2QPK spend (17,088-byte signature witness item)
+2. Submit it via sendrawtransaction on regtest with default mempool policy
+3. Confirm it is accepted into the mempool and mined in a subsequent block
+   without manual block injection (generateblock with explicit txids)
+```
+
+This is separate from block-validation testing (which only confirms the node
+accepts a pre-built block containing a P2QPK spend). A P2QPK spend must relay
+through default policy — `MAX_STANDARD_TX_WEIGHT = 400,000 wu` (verified in
+SIP-QOGE-PQC-02 §4) accommodates a P2QPK input (~17,150 wu, ~4.3% of limit),
+but `IsStandard()` / `AreInputsStandard()` and the witness item size checks in
+`policy/policy.cpp` must be confirmed to not reject it at the policy layer.
+
 ---
 
-**Phase C exit criteria**: ✅ Open Items 1 and 3 answered against real source.
-✅ Open Item 2 test vector preimage specified (hash value TBD — compute before
-Phase D). Open Item 4 unchanged (Symbiont Wallet M1.6, not a Phase C gate).
-**Phase D (C++ implementation of `SignatureHashP2QPK` and the
-`VerifyWitnessProgram` witver==2 branch) may now begin**, pending Open Item 2
-hash computation and cryptographic review of §3.
+**Phase C exit criteria**: ✅ All met.
+
+- ✅ Open Item 1: `m_bip341_taproot_ready` gating confirmed witver==1-specific; 1-line Init() fix identified
+- ✅ Open Item 2: P2QPKSighash preimage fully specified; hash `8a17f83e...` computed and independently recomputed by GPT-5.5 Thinking review (20 June 2026) — see `docs/sips/QOGE_P2QPK_PQC_Independent_Review.md`
+- ✅ Open Item 3: `HASHER_P2QPKSIGHASH` placement confirmed (`interpreter.cpp:1464`)
+- Open Item 4: Symbiont Wallet M1.6 — not a Phase C gate, unchanged
+
+**Phase D gate cleared**: independent cryptographic review PASS (with required safeguards).
+Safeguards A-E have been folded into the spec as normative requirements in §7 (above).
+Phase D implementation (`SignatureHashP2QPK` + `VerifyWitnessProgram` witver==2 branch)
+may begin in a future session.

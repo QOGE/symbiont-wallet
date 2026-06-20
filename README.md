@@ -89,8 +89,8 @@ secp256k1 point at rest, defeating any script-path PQC check).
 |-------|-------------|--------|
 | A | Symbiont Wallet address format: witver 0→2, Bech32→Bech32m | ✅ **COMPLETE** — this commit |
 | B | liboqs integration into Qogecoin Core build | ✅ **COMPLETE** — liboqs linked via `PKG_CHECK_MODULES([LIBOQS], [liboqs])` (Option B, host pkg-config, dev/Phase D-E only); committed locally in `qogecoin/qogecoin` as `8550582`, not pushed (fork+PR step deferred per §9) |
-| C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved against real source; P2QPKSighash test vector `8a17f83e...` computed and cross-validated against the BIP341 TapSighash reference; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
-| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ⏳ **BLOCKED** — pending independent cryptographic review of SIP-QOGE-PQC-02a §3 per SIP-QOGE-PQC-02 §9 (hard gate; not just "Pending") |
+| C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved; P2QPKSighash `8a17f83e...` computed, cross-validated, and **independently recomputed** by GPT-5.5 Thinking (PASS, 20 June 2026); five Phase D safeguards folded into spec as SIP-02a §7; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
+| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ⏳ **NOT YET STARTED** — review gate cleared (PASS); safeguards A-E normative in SIP-02a §7; may begin next session |
 | E | Regtest functional testing | ⏳ Pending |
 | F | Public testnet | ⏳ Pending |
 
@@ -305,8 +305,10 @@ for full normative detail.
   `Init()` extension identified (1-line `OP_1→OP_1||OP_2`); `HASHER_P2QPKSIGHASH`
   location confirmed (`interpreter.cpp:1464`); P2QPKSighash test vector
   `8a17f83e...` computed and cross-validated. See `docs/sips/SIP-QOGE-PQC-02a.md`.
-- **Phase D ⏳ BLOCKED:** independent cryptographic review of SIP-QOGE-PQC-02a §3
-  required before any C++ implementation (SIP-QOGE-PQC-02 §9 hard gate).
+- **Phase D ⏳ NOT YET STARTED:** review gate cleared — GPT-5.5 Thinking independent
+  review (20 June 2026) returned PASS; five required safeguards (exact sig length,
+  pure SLH-DSA mode, pinned liboqs, precompute tests, mempool relay test) folded into
+  SIP-QOGE-PQC-02a §7 as normative requirements. Implementation may begin next session.
 - Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via RPC)
 - Phase F: public testnet
 
