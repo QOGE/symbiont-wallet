@@ -90,7 +90,7 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | A | Symbiont Wallet address format: witver 0→2, Bech32→Bech32m | ✅ **COMPLETE** — this commit |
 | B | liboqs integration into Qogecoin Core build | ✅ **COMPLETE** — liboqs linked via `PKG_CHECK_MODULES([LIBOQS], [liboqs])` (Option B, host pkg-config, dev/Phase D-E only); committed locally in `qogecoin/qogecoin` as `8550582`, not pushed (fork+PR step deferred per §9) |
 | C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved; P2QPKSighash `8a17f83e...` computed, cross-validated, and **independently recomputed** by GPT-5.5 Thinking (PASS, 20 June 2026); five Phase D safeguards folded into spec as SIP-02a §7; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
-| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | 🔄 **IN PROGRESS** — step 1 done: `SignatureHashP2QPK` implemented; test vector `8a17f83e...` reproduced in C++ and passes (`2a4c85a`, local-only); `VerifyWitnessProgram` witver==2 branch is next |
+| D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | 🔄 **IN PROGRESS** — steps 1–3 done (local): `SignatureHashP2QPK` (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`); step 4 (liboqs `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wire-up) is next |
 | E | Regtest functional testing | ⏳ Pending |
 | F | Public testnet | ⏳ Pending |
 
@@ -305,10 +305,12 @@ for full normative detail.
   `Init()` extension identified (1-line `OP_1→OP_1||OP_2`); `HASHER_P2QPKSIGHASH`
   location confirmed (`interpreter.cpp:1464`); P2QPKSighash test vector
   `8a17f83e...` computed and cross-validated. See `docs/sips/SIP-QOGE-PQC-02a.md`.
-- **Phase D 🔄 IN PROGRESS:** step 1 complete — `SignatureHashP2QPK` implemented in
-  `interpreter.cpp`; `Init()` extended to trigger `m_spent_amounts/scripts_single_hash`
-  for OP_2 (P2QPK) inputs; test vector `8a17f83e...` reproduced in C++ and passes
-  (`qogecoin` commit `2a4c85a`, local-only). Next: `VerifyWitnessProgram` witver==2 branch.
+- **Phase D 🔄 IN PROGRESS:** steps 1–3 complete (local-only commits):
+  - Step 1 (`2a4c85a`): `SignatureHashP2QPK` + test vector `8a17f83e...` in C++
+  - Step 2 (`468f367`): `Init()` OP_2 trigger + safeguard-D tests (unforced precompute path)
+  - Step 3 (`abb93a0`): `VerifyWitnessProgram` witver==2 branch — exact-length checks (§7-A),
+    HASH256 commitment, `SCRIPT_VERIFY_P2QPK` gate, missing-data guard; liboqs call stubbed
+  - Step 4 next: wire `OQS_SIG_slh_dsa_pure_sha2_128f_verify` (pure mode, §7-B)
 - Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via RPC)
 - Phase F: public testnet
 
