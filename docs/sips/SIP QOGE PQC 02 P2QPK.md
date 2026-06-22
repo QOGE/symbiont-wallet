@@ -138,7 +138,7 @@ introduce one without re-justifying against this table.
 | A | Wallet address format (witver 0->2, Bech32m) | ✅ DONE (symbiont-wallet) |
 | B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only); Option A (`depends/packages/liboqs.mk`, CMake) deferred to Phase F+, see CLAUDE.md and §7-C |
 | C | Sighash sub-spec review (SIP-QOGE-PQC-02a open items) | ✅ DONE — all open items resolved; P2QPKSighash `8a17f83e...` independently reviewed (GPT-5.5, PASS); Phase D safeguards A-E folded into spec as §7 |
-| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | 🔄 IN PROGRESS — steps 1–3 complete (local): `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`); liboqs `OQS_SIG_slh_dsa_pure_sha2_128f_verify` stub — step 4 (liboqs wire-up) is next |
+| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ✅ DONE (local) — `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass |
 | E | Regtest functional testing | ⏳ Pending |
 | F | Public testnet | ⏳ Pending |
 
