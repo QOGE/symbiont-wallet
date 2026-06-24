@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 
@@ -551,5 +552,80 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 		if err := w.OnConfirmation(addr); err != nil {
 			t.Fatalf("OnConfirmation failed: %v", err)
 		}
+	}
+}
+
+// TestP2QPKSighashCrossValidationVector pins computeP2QPKSighash against the
+// independently-verified reference value from SIP-QOGE-PQC-02a §6 Open Item 2.
+//
+// Source transaction: BIP341 keyPathSpending[0]
+// (src/test/data/bip341_wallet_vectors.json in qogecoin/qogecoin).
+// Intermediate hashes and final sighash were computed in Phase C (Python),
+// cross-validated against BIP341 TapSighash, and independently recomputed
+// by GPT-5.5 Thinking (20 June 2026). All three agree on 8a17f83e...
+//
+// This is a pure-function test — no wallet DB, no CGo, no key material.
+func TestP2QPKSighashCrossValidationVector(t *testing.T) {
+	hx := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatalf("bad hex in test data %q: %v", s, err)
+		}
+		return b
+	}
+	txLE := func(s string) [32]byte {
+		b := hx(s)
+		if len(b) != 32 {
+			t.Fatalf("txid hex %q decoded to %d bytes, want 32", s, len(b))
+		}
+		var arr [32]byte
+		copy(arr[:], b)
+		return arr
+	}
+
+	// BIP341 keyPathSpending[0]: 9 inputs, 9 spent UTXOs, 2 outputs.
+	// nVersion=2, nLockTime=500000000, in_pos=0 (signing input 0).
+	params := P2QPKSpendParams{
+		NVersion:  2,
+		NLockTime: 500_000_000,
+		Inputs: []SpendInput{
+			{TxIDLE: txLE("7de20cbff686da83a54981d2b9bab3586f4ca7e48f57f5b55963115f3b334e9c"), Vout: 1, NSequence: 0x00000000},
+			{TxIDLE: txLE("d7b7cab57b1393ace2d064f4d4a2cb8af6def61273e127517d44759b6dafdd99"), Vout: 0, NSequence: 0xffffffff},
+			{TxIDLE: txLE("f8e1f583384333689228c5d28eac13366be082dc57441760d957275419a41842"), Vout: 0, NSequence: 0xffffffff},
+			{TxIDLE: txLE("f0689180aa63b30cb162a73c6d2a38b7eeda2a83ece74310fda0843ad604853b"), Vout: 1, NSequence: 0xfffffffe},
+			{TxIDLE: txLE("aa5202bdf6d8ccd2ee0f0202afbbb7461d9264a25e5bfd3c5a52ee1239e0ba6c"), Vout: 0, NSequence: 0xfffffffe},
+			{TxIDLE: txLE("956149bdc66faa968eb2be2d2faa29718acbfe3941215893a2a3446d32acd050"), Vout: 0, NSequence: 0x00000000},
+			{TxIDLE: txLE("e664b9773b88c09c32cb70a2a3e4da0ced63b7ba3b22f848531bbb1d5d5f4c94"), Vout: 1, NSequence: 0x00000000},
+			{TxIDLE: txLE("e9aa6b8e6c9de67619e6a3924ae25696bb7b694bb677a632a74ef7eadfd4eabf"), Vout: 0, NSequence: 0xffffffff},
+			{TxIDLE: txLE("a778eb6a263dc090464cd125c466b5a99667720b1c110468831d058aa1b82af1"), Vout: 1, NSequence: 0xffffffff},
+		},
+		SpentUTXOs: []SpentUTXO{
+			{Amount: 420_000_000, Script: hx("512053a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343")},
+			{Amount: 462_000_000, Script: hx("5120147c9c57132f6e7ecddba9800bb0c4449251c92a1e60371ee77557b6620f3ea3")},
+			{Amount: 294_000_000, Script: hx("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")},
+			{Amount: 504_000_000, Script: hx("5120e4d810fd50586274face62b8a807eb9719cef49c04177cc6b76a9a4251d5450e")},
+			{Amount: 630_000_000, Script: hx("512091b64d5324723a985170e4dc5a0f84c041804f2cd12660fa5dec09fc21783605")},
+			{Amount: 378_000_000, Script: hx("00147dd65592d0ab2fe0d0257d571abf032cd9db93dc")},
+			{Amount: 672_000_000, Script: hx("512075169f4001aa68f15bbed28b218df1d0a62cbbcf1188c6665110c293c907b831")},
+			{Amount: 546_000_000, Script: hx("5120712447206d7a5238acc7ff53fbe94a3b64539ad291c7cdbc490b7577e4b17df5")},
+			{Amount: 588_000_000, Script: hx("512077e30a5522dd9f894c3f8b8bd4c4b2cf82ca7da8a3ea6a239655c39c050ab220")},
+		},
+		Outputs: []SpendOutput{
+			{Amount: 1_000_000_000, Script: hx("76a91406afd46bcdfd22ef94ac122aa11f241244a37ecc88ac")},
+			{Amount: 3_410_000_000, Script: hx("ac9a87f5594be208f8532db38cff670c450ed2fea8fcdefcc9a663f78bab962b")},
+		},
+		InputIndex: 0,
+		FromAddr:   "", // not accessed by computeP2QPKSighash
+	}
+
+	got, err := computeP2QPKSighash(params)
+	if err != nil {
+		t.Fatalf("computeP2QPKSighash: %v", err)
+	}
+
+	const want = "8a17f83ed68457d5469f4bbcfc68ddaeaa70739522c1b6fb76685ba7b2008c38"
+	if gotHex := hex.EncodeToString(got); gotHex != want {
+		t.Fatalf("P2QPKSighash mismatch:\n  got:  %s\n  want: %s\n  (SIP-QOGE-PQC-02a §6 Open Item 2 reference value)",
+			gotHex, want)
 	}
 }
