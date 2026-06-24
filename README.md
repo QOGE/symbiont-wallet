@@ -6,8 +6,10 @@ SIP-QOGE-PQC-02 (Phase A).**
 SLH-DSA-SHA2-128f (FIPS 205) signatures | P2QPK single-use addresses (witness v2 / Bech32m) | HNDL defence
 
 > ⚠️ **EXPERIMENTAL — wallet-side core implemented and tested. Consensus-side
-> (P2QPK soft fork) is at Candidate spec stage. DO NOT USE IN PRODUCTION.**
-> Phase 3 independent audit is mandatory before any mainnet deployment.
+> Phase E (regtest validation) complete — tampered-sig rejected, real SLH-DSA
+> spend accepted and confirmed on-chain. Phase F (public testnet) is next.
+> DO NOT USE IN PRODUCTION. Phase 3 independent audit is mandatory before any
+> mainnet deployment.**
 
 **Status: 47/47 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real
 `bq1z...` P2QPK addresses (witness version 2, Bech32m/BIP350), real
@@ -91,7 +93,7 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | B | liboqs integration into Qogecoin Core build | ✅ **COMPLETE** — liboqs linked via `PKG_CHECK_MODULES([LIBOQS], [liboqs])` (Option B, host pkg-config, dev/Phase D-E only); committed locally in `qogecoin/qogecoin` as `8550582`, not pushed (fork+PR step deferred per §9) |
 | C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved; P2QPKSighash `8a17f83e...` computed, cross-validated, and **independently recomputed** by GPT-5.5 Thinking (PASS, 20 June 2026); five Phase D safeguards folded into spec as SIP-02a §7; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
 | D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ✅ **COMPLETE** (local) — `SignatureHashP2QPK` (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; not pushed (fork+PR deferred per §9) |
-| E | Regtest functional testing | ⏳ Pending |
+| E | Regtest functional testing | ✅ **COMPLETE** — regtest validation complete — tampered-sig rejected, real SLH-DSA spend accepted and confirmed (`56a2aed` in [QOGE/qogecoin](https://github.com/QOGE/qogecoin)) |
 | F | Public testnet | ⏳ Pending |
 
 **Important:** addresses produced by this wallet (witver=2) are, on the
@@ -313,8 +315,15 @@ for full normative detail.
   - Step 4 (`816cd06`): `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired (pure mode, §7-B);
     `extern "C"` required (sig_slh_dsa.h lacks own guard); compile-time `#error` if SLH-DSA
     variant absent; `p2qpk_bad_sig_rejected` test confirms stub is gone; 5/5 tests pass
-- Phase E: regtest functional testing (Symbiont Wallet ↔ modified node via RPC)
-- Phase F: public testnet
+- **Phase E ✅ COMPLETE** (`56a2aed` in [QOGE/qogecoin](https://github.com/QOGE/qogecoin)):
+  `DEPLOYMENT_P2QPK` added to `DeploymentPos` enum, `deploymentinfo.cpp`, and
+  `CRegTestParams.vDeployments` (`ALWAYS_ACTIVE`); `DeploymentActiveAt(DEPLOYMENT_P2QPK)`
+  gates `SCRIPT_VERIFY_P2QPK` in `GetBlockScriptFlags`. Validated on regtest:
+  tampered-sig spend rejected (`SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH` from
+  `OQS_SIG_slh_dsa_pure_sha2_128f_verify`); real SLH-DSA spend accepted and
+  confirmed on-chain.
+- Phase F: public testnet — bech32_hrp decision, Option A liboqs build
+  (`depends/packages/liboqs.mk`), BIP9 governance for mainnet activation
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
