@@ -22,6 +22,7 @@ package wallet
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -337,4 +338,187 @@ func hkdfDerive32(seed, info []byte) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// ─── P2QPK spend signing (M1.6, SIP-QOGE-PQC-02a §3) ─────────────────────────
+
+// SpendInput is one input in a P2QPK spend transaction.
+type SpendInput struct {
+	TxIDLE    [32]byte // txid in wire byte order (reversed from RPC display)
+	Vout      uint32
+	NSequence uint32
+}
+
+// SpentUTXO is the UTXO being consumed by a SpendInput (parallel with Inputs).
+type SpentUTXO struct {
+	Amount int64  // value in satoshis
+	Script []byte // scriptPubKey bytes
+}
+
+// SpendOutput is one output in the spend transaction.
+type SpendOutput struct {
+	Amount int64
+	Script []byte
+}
+
+// P2QPKSpendParams carries the transaction data needed to compute the
+// P2QPKSighash and sign a specific input per SIP-QOGE-PQC-02a §3.
+type P2QPKSpendParams struct {
+	NVersion   int32
+	NLockTime  uint32
+	Inputs     []SpendInput
+	SpentUTXOs []SpentUTXO // parallel with Inputs; holds the UTXOs being consumed
+	Outputs    []SpendOutput
+	InputIndex uint32 // index of the input being signed
+	FromAddr   string // must be in PENDING state in the wallet index
+}
+
+// SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
+// params.FromAddr must be in PENDING state. Returns the SLH-DSA public key
+// (32 bytes) and signature (17,088 bytes).
+// The message signed is the 32-byte P2QPKSighash — NOT canonicalMessageHash,
+// which is only for the CLI generic message-signing demo (Open Item 4).
+func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, err error) {
+	rec, err := w.index.GetRecord(params.FromAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address not found: %w", err)
+	}
+	if rec.State != keystore.StatePending {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want PENDING)",
+			params.FromAddr, rec.State)
+	}
+
+	sighash, err := computeP2QPKSighash(params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sighash: %w", err)
+	}
+
+	rawSeed, err := w.index.DecryptSeed(rec.EncSeedBlob)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: decrypt seed: %w", err)
+	}
+	defer keystore.ZeroBytes(rawSeed)
+
+	s, err := slhdsa.ImportSigner(rawSeed, rec.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: import signer: %w", err)
+	}
+	defer s.Clean()
+
+	// Sign the raw 32-byte P2QPKSighash per §7-B: pure SLH-DSA, empty context, raw hash as message.
+	signature, err := s.Sign(sighash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sign: %w", err)
+	}
+
+	return rec.PublicKey, signature, nil
+}
+
+// computeP2QPKSighash implements SIP-QOGE-PQC-02a §3, mirroring
+// SignatureHashP2QPK in src/script/interpreter.cpp exactly.
+//
+// TaggedHash("P2QPKSighash"; epoch || SIGHASH_ALL || nVersion || nLockTime ||
+//
+//	hashPrevouts || hashAmounts || hashScriptPubkeys || hashSequences ||
+//	hashOutputs || in_pos)
+func computeP2QPKSighash(p P2QPKSpendParams) ([]byte, error) {
+	if int(p.InputIndex) >= len(p.Inputs) {
+		return nil, fmt.Errorf("computeP2QPKSighash: InputIndex %d out of range (len %d)",
+			p.InputIndex, len(p.Inputs))
+	}
+	if len(p.Inputs) != len(p.SpentUTXOs) {
+		return nil, fmt.Errorf("computeP2QPKSighash: Inputs len %d != SpentUTXOs len %d",
+			len(p.Inputs), len(p.SpentUTXOs))
+	}
+
+	// TaggedHash("P2QPKSighash"; preimage) = SHA256(SHA256(tag) || SHA256(tag) || preimage)
+	tag := sha256.Sum256([]byte("P2QPKSighash"))
+	h := sha256.New()
+	h.Write(tag[:])
+	h.Write(tag[:])
+
+	// Epoch (0x00) and SIGHASH_ALL (0x01)
+	h.Write([]byte{0x00, 0x01})
+
+	var b4 [4]byte
+	var b8 [8]byte
+
+	// nVersion (int32 LE)
+	binary.LittleEndian.PutUint32(b4[:], uint32(p.NVersion))
+	h.Write(b4[:])
+
+	// nLockTime (uint32 LE)
+	binary.LittleEndian.PutUint32(b4[:], p.NLockTime)
+	h.Write(b4[:])
+
+	// m_prevouts_single_hash = SHA256(txid_wire || vout_LE32 for each input)
+	hp := sha256.New()
+	for _, inp := range p.Inputs {
+		hp.Write(inp.TxIDLE[:])
+		binary.LittleEndian.PutUint32(b4[:], inp.Vout)
+		hp.Write(b4[:])
+	}
+	h.Write(hp.Sum(nil))
+
+	// m_spent_amounts_single_hash = SHA256(amount_LE64 for each spent UTXO)
+	ha := sha256.New()
+	for _, u := range p.SpentUTXOs {
+		binary.LittleEndian.PutUint64(b8[:], uint64(u.Amount))
+		ha.Write(b8[:])
+	}
+	h.Write(ha.Sum(nil))
+
+	// m_spent_scripts_single_hash = SHA256(compact_size(len) || script for each spent UTXO)
+	hs := sha256.New()
+	for _, u := range p.SpentUTXOs {
+		writeCompactSize(hs, uint64(len(u.Script)))
+		hs.Write(u.Script)
+	}
+	h.Write(hs.Sum(nil))
+
+	// m_sequences_single_hash = SHA256(nSequence_LE32 for each input)
+	hq := sha256.New()
+	for _, inp := range p.Inputs {
+		binary.LittleEndian.PutUint32(b4[:], inp.NSequence)
+		hq.Write(b4[:])
+	}
+	h.Write(hq.Sum(nil))
+
+	// m_outputs_single_hash = SHA256(amount_LE64 || compact_size(len) || script for each output)
+	ho := sha256.New()
+	for _, out := range p.Outputs {
+		binary.LittleEndian.PutUint64(b8[:], uint64(out.Amount))
+		ho.Write(b8[:])
+		writeCompactSize(ho, uint64(len(out.Script)))
+		ho.Write(out.Script)
+	}
+	h.Write(ho.Sum(nil))
+
+	// in_pos (uint32 LE)
+	binary.LittleEndian.PutUint32(b4[:], p.InputIndex)
+	h.Write(b4[:])
+
+	return h.Sum(nil), nil
+}
+
+// writeCompactSize writes a Bitcoin compact-size (variable-length) integer to w.
+func writeCompactSize(w io.Writer, v uint64) {
+	var buf [9]byte
+	switch {
+	case v < 0xfd:
+		buf[0] = byte(v)
+		w.Write(buf[:1]) //nolint:errcheck
+	case v <= 0xffff:
+		buf[0] = 0xfd
+		binary.LittleEndian.PutUint16(buf[1:], uint16(v))
+		w.Write(buf[:3]) //nolint:errcheck
+	case v <= 0xffffffff:
+		buf[0] = 0xfe
+		binary.LittleEndian.PutUint32(buf[1:], uint32(v))
+		w.Write(buf[:5]) //nolint:errcheck
+	default:
+		buf[0] = 0xff
+		binary.LittleEndian.PutUint64(buf[1:], v)
+		w.Write(buf[:9]) //nolint:errcheck
+	}
 }
