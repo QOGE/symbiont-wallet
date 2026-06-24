@@ -78,9 +78,10 @@ The AES-256-GCM key is derived from the master seed via HKDF-SHA256 with info `"
 ## Key Open Items (do not close without addressing)
 
 - **M1.3 — non-deterministic keygen:** `wallet.deriveAddress()` calls `slhdsa.NewSigner()` (random), ignoring `childSeed`. Losing `qoge_wallet.db` loses the wallet even with the seed. The TODO is to pass `childSeed` to liboqs once it exposes FIPS 205 §10.1 seeded keygen.
-- **M1.6 — `QOGETransaction` is a stub:** `wallet.go`'s `SignTransaction` uses a placeholder struct. Real consensus integration (SIP-QOGE-PQC-02 Phases B–F) happens in `qogecoin/qogecoin`, not here.
+- **M1.6 — `SignP2QPKInput` implemented; `QOGETransaction`/`SignTransaction` still a stub:** `wallet.go` now has `SignP2QPKInput` (449300d) which computes the correct P2QPKSighash per SIP-02a §3 and signs it with SLH-DSA. `SignTransaction` retains the placeholder `QOGETransaction` struct — real chain-layer integration (SIP-QOGE-PQC-02 Phases B–F) happens in `qogecoin/qogecoin`, not here.
 - **`go.mod` replace directive** must be updated per machine (see above).
 - **SIP-QOGE-PQC-02 Phase B — liboqs in Qogecoin Core (Option B, dev-only):** `qogecoin/qogecoin`'s `configure.ac` uses `PKG_CHECK_MODULES([LIBOQS], [liboqs])` to find the system-installed liboqs at `/usr/local`. This is Option B — sufficient for Phase D/E on this dev VM. **Option A — `depends/packages/liboqs.mk`, CMake via `$(package)_cmake`, following the `native_libmultiprocess.mk` template — is required before any cross-compiled build (Phase F+). Currently using Option B (host pkg-config) for dev/Phase D-E only.**
+- **SIP-QOGE-PQC-02 Phase E — in progress, steps 1–5 done:** Node running in regtest, blocks mined (yescrypt PoWHash fix in `rpc/mining.cpp` + DGW `fPowNoRetargeting` fix in `pow.cpp`), P2QPK UTXO confirmed on-chain (`witness_unknown`, correct pre-activation behaviour), spend transaction mined with 17,088-byte SLH-DSA witness (449300d), sighash cross-validation test added (3689e00, 19/19 tests pass). **Remaining:** add `DEPLOYMENT_P2QPK` to `CRegTestParams.vDeployments` with `ALWAYS_ACTIVE` for regtest, set `SCRIPT_VERIFY_P2QPK` in the regtest policy flags, then re-run the spend test to confirm the node enforces actual SLH-DSA signature verification (not just the pre-activation anyone-can-spend path).
 
 ## SLH-DSA Constants
 
