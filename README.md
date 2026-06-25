@@ -48,8 +48,7 @@ QOGE address = Bech32m(hrp="bq", witver=2, HASH256(SLH-DSA-pubkey))
 Example:        bq1z9vedkmpvpf3rt7cnjl5zyh4gtc8sum5v0vfx6qqkej77pen8z50qglwrd3
 ```
 
-The public key is hidden at rest behind HASH256. It is only revealed
-in the witness field for ~30-60 seconds at spend time (1-minute block time).
+The public key is hidden at rest behind HASH256. It is revealed in the witness field at spend time and remains visible until the spending transaction reaches 101 confirmations (~101 minutes), at which point the private key is destroyed by the wallet (`KeyDestructionMinConfirmations = 101`, coinbase maturity depth). The exposure window does not enable quantum key recovery — SLH-DSA's security does not depend on any problem Shor's algorithm can solve. The single-use model and 101-block destruction window exist to prevent accidental address reuse, which is the actual threat to SLH-DSA's security properties.
 
 **Witness version 2, not 0.** A 32-byte witness-v0 program is defined by
 BIP141 as P2WSH (`SHA256(script)`) — an unrelated commitment. Witness
