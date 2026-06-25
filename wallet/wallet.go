@@ -41,6 +41,33 @@ const PreGenPoolSize = 20
 // cross-protocol signature reuse.
 const MessagePrefix = "Qogecoin Signed Message:"
 
+// KeyDestructionMinConfirmations is the minimum number of block confirmations
+// required before OnConfirmation() will destroy a P2QPK private key.
+//
+// Set to 101 — Qogecoin's coinbase maturity depth — which represents the
+// network's own standard for permanent transaction settlement. Key destruction
+// at this depth is not a security requirement (the single-use address model
+// provides HNDL protection regardless) but an operational safeguard that makes
+// accidental address reuse structurally impossible once a transaction is
+// mature. A reorg of this depth would constitute catastrophic chain failure,
+// not routine operation.
+//
+// Applications MAY increase this value via SetKeyDestructionMinConfirmations()
+// but SHOULD NOT decrease it below 101 in production.
+const KeyDestructionMinConfirmations = 101
+
+// keyDestructionMinConfirmations is the runtime value, defaulting to the constant.
+var keyDestructionMinConfirmations = KeyDestructionMinConfirmations
+
+// SetKeyDestructionMinConfirmations overrides the default confirmation threshold
+// for key destruction. Must be called before any OnConfirmation() call.
+// Values below 1 are silently ignored. Production use SHOULD NOT set below 101.
+func SetKeyDestructionMinConfirmations(n int) {
+	if n >= 1 {
+		keyDestructionMinConfirmations = n
+	}
+}
+
 // ─── QOGETransaction (stub) ───────────────────────────────────────────────────
 
 // QOGETransaction is a placeholder for the QOGE chain transaction structure.
@@ -139,15 +166,23 @@ func (w *Wallet) MarkPaymentReceived(addr string) error {
 	return nil
 }
 
-// OnConfirmation must be called when a spend transaction from addr achieves
-// 1 confirmation on the QOGE chain. It:
+// OnConfirmation retires the address and zeros its private key once the
+// spending transaction reaches keyDestructionMinConfirmations depth.
+// Returns nil (no-op) if confirmations < keyDestructionMinConfirmations.
+// The caller is responsible for tracking confirmation depth — do not call
+// this until the transaction has reached the required depth.
+//
+// When confirmations >= keyDestructionMinConfirmations it:
 //  1. Transitions addr PENDING → SPENT
 //  2. Transitions addr SPENT → RETIRED (zeros the private key seed)
 //  3. Refills the pre-generation pool (M2.2)
 //
 // M1.5 MILESTONE: This is the key destruction callback.
 // Wire this to the QOGE chain's block notification system.
-func (w *Wallet) OnConfirmation(addr string) error {
+func (w *Wallet) OnConfirmation(addr string, confirmations int) error {
+	if confirmations < keyDestructionMinConfirmations {
+		return nil // not yet mature — do not destroy key
+	}
 	if err := w.index.MarkSpent(addr); err != nil {
 		return fmt.Errorf("wallet: OnConfirmation (MarkSpent): %w", err)
 	}

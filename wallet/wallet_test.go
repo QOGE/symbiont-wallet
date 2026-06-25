@@ -389,7 +389,7 @@ func TestOnConfirmationRetiresAndZeroesKey(t *testing.T) {
 		t.Fatalf("SignMessage failed: %v", err)
 	}
 
-	if err := w.OnConfirmation(addr); err != nil {
+	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 
@@ -414,7 +414,7 @@ func TestOnConfirmationFailsForNonPendingAddress(t *testing.T) {
 	}
 
 	// addr is FRESH, never marked PENDING — OnConfirmation must fail.
-	if err := w.OnConfirmation(addr); err == nil {
+	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err == nil {
 		t.Fatal("OnConfirmation should fail for a non-PENDING address")
 	}
 }
@@ -431,7 +431,7 @@ func TestSignMessageAfterRetirementFails(t *testing.T) {
 	if err := w.MarkPaymentReceived(addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
-	if err := w.OnConfirmation(addr); err != nil {
+	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 
@@ -472,7 +472,7 @@ func TestOnConfirmationRefillsPool(t *testing.T) {
 		t.Errorf("FRESH count after MarkPaymentReceived = %d, want %d", mid, PreGenPoolSize-1)
 	}
 
-	if err := w.OnConfirmation(addr); err != nil {
+	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 
@@ -524,7 +524,7 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 	}
 
 	// 3. Confirm: key destroyed, address retired.
-	if err := w.OnConfirmation(receiveAddr); err != nil {
+	if err := w.OnConfirmation(receiveAddr, KeyDestructionMinConfirmations); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 	rec, err := w.index.GetRecord(receiveAddr)
@@ -549,7 +549,7 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 		if err := w.MarkPaymentReceived(addr); err != nil {
 			t.Fatalf("MarkPaymentReceived failed: %v", err)
 		}
-		if err := w.OnConfirmation(addr); err != nil {
+		if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
 			t.Fatalf("OnConfirmation failed: %v", err)
 		}
 	}

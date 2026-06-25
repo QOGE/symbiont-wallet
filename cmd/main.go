@@ -146,7 +146,7 @@ mainMenu:
 			// In production this is triggered by the chain's block notification, not the CLI.
 			fmt.Print("  Enter address to confirm (mark SPENT → RETIRED, zero key): ")
 			addr := strings.TrimSpace(prompt())
-			if err := w.OnConfirmation(addr); err != nil {
+			if err := w.OnConfirmation(addr, wallet.KeyDestructionMinConfirmations); err != nil {
 				fmt.Printf("  ✗ Error: %v\n", err)
 				continue
 			}
