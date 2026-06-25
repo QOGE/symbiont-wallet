@@ -138,8 +138,8 @@ introduce one without re-justifying against this table.
 | A | Wallet address format (witver 0->2, Bech32m) | ✅ DONE (symbiont-wallet) |
 | B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only); Option A (`depends/packages/liboqs.mk`, CMake) deferred to Phase F+, see CLAUDE.md and §7-C |
 | C | Sighash sub-spec review (SIP-QOGE-PQC-02a open items) | ✅ DONE — all open items resolved; P2QPKSighash `8a17f83e...` independently reviewed (GPT-5.5, PASS); Phase D safeguards A-E folded into spec as §7 |
-| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ✅ DONE (local) — `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass |
-| E | Regtest functional testing | ⏳ Pending |
+| D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ✅ DONE (local) — `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; activation: `DEPLOYMENT_P2QPK` in `DeploymentPos` + `deploymentinfo.cpp` + `CRegTestParams.vDeployments` (`ALWAYS_ACTIVE`); `DeploymentActiveAt` gates `SCRIPT_VERIFY_P2QPK` in `GetBlockScriptFlags` (`56a2aed`) |
+| E | Regtest functional testing | ✅ DONE — regtest validation complete — `DEPLOYMENT_P2QPK` activated (`56a2aed` in QOGE/qogecoin), tampered-sig rejected via `OQS_SIG_slh_dsa_pure_sha2_128f_verify`, real SLH-DSA spend accepted and confirmed in block |
 | F | Public testnet | ⏳ Pending |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
@@ -157,7 +157,4 @@ introduce one without re-justifying against this table.
 | `src/script/interpreter.h` | 168-170 | `PrecomputedTransactionData::m_spent_outputs*` |
 | `src/script/interpreter.cpp` | 1478-1538 | `SignatureHashSchnorr` — template for `SignatureHashP2QPK` |
 
-Line numbers verified 14 June 2026 against the shallow clone at `~/qogecoin`.
-**Re-verify before Phase D** — lines drift as the tree changes (Phase B
-already added ~18 lines to `configure.ac`/`Makefile.am`, unrelated files but
-a reminder that line numbers aren't permanent).
+Line numbers verified 14 June 2026. Phase D complete as of 24 June 2026 (`56a2aed`). Re-verify before Phase F — line numbers drift as the tree changes.
