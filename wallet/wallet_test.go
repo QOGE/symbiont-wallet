@@ -405,6 +405,39 @@ func TestOnConfirmationRetiresAndZeroesKey(t *testing.T) {
 	}
 }
 
+// TestOnConfirmationNoOpBelowMinConfirmations verifies that OnConfirmation is a
+// no-op (returns nil, leaves address PENDING) for any confirmations count below
+// KeyDestructionMinConfirmations. Checks 0 and 100 — the boundary just below
+// the threshold.
+func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
+	w := newTestWallet(t)
+
+	addr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(addr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+
+	for _, confs := range []int{0, KeyDestructionMinConfirmations - 1} {
+		if err := w.OnConfirmation(addr, confs); err != nil {
+			t.Fatalf("OnConfirmation(%d) returned error, want nil no-op: %v", confs, err)
+		}
+		rec, err := w.index.GetRecord(addr)
+		if err != nil {
+			t.Fatalf("GetRecord failed: %v", err)
+		}
+		if rec.State != keystore.StatePending {
+			t.Errorf("confirmations=%d: state = %s, want PENDING (key must not be destroyed yet)",
+				confs, rec.State)
+		}
+		if rec.EncSeedBlob == nil {
+			t.Errorf("confirmations=%d: EncSeedBlob is nil — key was destroyed prematurely", confs)
+		}
+	}
+}
+
 func TestOnConfirmationFailsForNonPendingAddress(t *testing.T) {
 	w := newTestWallet(t)
 
