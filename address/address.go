@@ -48,11 +48,40 @@ import (
 	"github.com/btcsuite/btcutil/bech32"
 )
 
-// HRP is the human-readable part for QOGE Bech32m addresses.
-// All QOGE addresses start with "bq1". Confirmed against qogecoin/qogecoin
+// HRP is the human-readable part for QOGE Bech32m mainnet addresses.
+// All mainnet QOGE addresses start with "bq1". Confirmed against qogecoin/qogecoin
 // release notes ("Bech32 addresses have a bq prefix") — see SIP-QOGE-PQC-01
 // HRP correction.
 const HRP = "bq"
+
+// Network identifies which Qogecoin network an address belongs to.
+type Network uint8
+
+const (
+	Mainnet Network = iota // bq1z...
+	Testnet                // bqt1z...
+	Regtest                // bq1z... (same as mainnet for now; bqrt future consideration)
+)
+
+// HRP returns the bech32m human-readable part for the network.
+func (n Network) HRP() string {
+	switch n {
+	case Testnet:
+		return "bqt"
+	default: // Mainnet and Regtest both use "bq"
+		return "bq"
+	}
+}
+
+// DefaultNetwork is the network used by FromPublicKey and ToHash when no
+// explicit network is provided. Defaults to Mainnet.
+var DefaultNetwork = Mainnet
+
+// knownHRPs maps every recognised QOGE HRP to its Network.
+var knownHRPs = map[string]Network{
+	"bq":  Mainnet,
+	"bqt": Testnet,
+}
 
 // WitnessVersion is the SegWit witness version for P2QPK addresses.
 //
@@ -80,28 +109,53 @@ var ErrWrongHRP = errors.New("address: wrong human-readable part (not a QOGE add
 // Section 4.
 var ErrTaprootDetected = errors.New("address: Taproot (witness v1 / P2TR) addresses are rejected — HNDL risk via key-path spending, see SIP-QOGE-PQC-02 Section 4")
 
-// FromPublicKey derives a QOGE P2QPK address from a 32-byte SLH-DSA public key.
-// This is the canonical address derivation function for the QOGE SPHINCS
-// (Symbiont) wallet.
+// FromPublicKey derives a QOGE P2QPK address from a 32-byte SLH-DSA public key
+// using DefaultNetwork (Mainnet unless overridden).
 func FromPublicKey(pubKey []byte) (string, error) {
+	return FromPublicKeyOnNetwork(pubKey, DefaultNetwork)
+}
+
+// FromPublicKeyOnNetwork derives a QOGE P2QPK address for the given network.
+func FromPublicKeyOnNetwork(pubKey []byte, net Network) (string, error) {
 	if len(pubKey) != 32 {
 		return "", ErrInvalidPublicKeyLength
 	}
 	hash := hash256(pubKey)
-	return encode(hash)
+	return encode(hash, net)
 }
 
 // ToHash decodes a QOGE address string and returns the 32-byte HASH256
-// program. Use this to verify that a received address matches an expected
-// public key.
+// program. Accepts any known QOGE network HRP ("bq", "bqt").
+// Use ParseAddress to also retrieve which network the address belongs to.
 func ToHash(addr string) ([]byte, error) {
+	hash, _, err := decode(addr)
+	return hash, err
+}
+
+// ParseAddress decodes a QOGE address and returns the 32-byte HASH256 program
+// and the network the address belongs to.
+func ParseAddress(addr string) ([]byte, Network, error) {
 	return decode(addr)
 }
 
-// ValidateAddress checks that addr is a well-formed QOGE P2QPK address.
-// Returns nil if valid, a descriptive error otherwise.
+// DecodeForNetwork decodes addr and returns an error if it does not belong to
+// the expected network. Use this to enforce network separation at API
+// boundaries (e.g. reject a bqt1z... testnet address where bq1z... is expected).
+func DecodeForNetwork(addr string, net Network) ([]byte, error) {
+	hash, got, err := decode(addr)
+	if err != nil {
+		return nil, err
+	}
+	if got != net {
+		return nil, fmt.Errorf("%w: got %q, want %q", ErrWrongHRP, got.HRP(), net.HRP())
+	}
+	return hash, nil
+}
+
+// ValidateAddress checks that addr is a well-formed QOGE P2QPK address on any
+// known network. Returns nil if valid, a descriptive error otherwise.
 func ValidateAddress(addr string) error {
-	_, err := decode(addr)
+	_, _, err := decode(addr)
 	return err
 }
 
@@ -111,7 +165,7 @@ func MatchesPublicKey(addr string, pubKey []byte) (bool, error) {
 	if len(pubKey) != 32 {
 		return false, ErrInvalidPublicKeyLength
 	}
-	decoded, err := decode(addr)
+	decoded, _, err := decode(addr)
 	if err != nil {
 		return false, err
 	}
@@ -146,9 +200,9 @@ func constantForWitnessVersion(witver int) int {
 	return bech32mConst
 }
 
-// encode converts a 32-byte HASH256 program to a Bech32m address with
-// HRP="bq" and witness version WitnessVersion (2).
-func encode(hash []byte) (string, error) {
+// encode converts a 32-byte HASH256 program to a Bech32m address using the
+// HRP for net and witness version WitnessVersion (2).
+func encode(hash []byte, net Network) (string, error) {
 	// bech32.ConvertBits (from btcutil — unaffected by BIP350, exported)
 	// regroups 8-bit bytes into 5-bit values.
 	converted, err := bech32.ConvertBits(hash, 8, 5, true)
@@ -157,19 +211,19 @@ func encode(hash []byte) (string, error) {
 	}
 	// Prepend the witness version byte (already a valid 5-bit value, 0-16).
 	payload := append([]byte{WitnessVersion}, converted...)
-	addr, err := encodeGeneric(HRP, payload, constantForWitnessVersion(WitnessVersion))
+	addr, err := encodeGeneric(net.HRP(), payload, constantForWitnessVersion(WitnessVersion))
 	if err != nil {
 		return "", fmt.Errorf("address: bech32m encode failed: %w", err)
 	}
 	return addr, nil
 }
 
-// decode decodes a QOGE P2QPK address and returns the 32-byte HASH256
-// program.
+// decode decodes a QOGE P2QPK address and returns the 32-byte HASH256 program
+// and the network inferred from the HRP.
 //
 // Validation performed, in order:
 //  1. bech32/bech32m structural decode + checksum (bech32m.go)
-//  2. HRP must be "bq"
+//  2. HRP must be a known QOGE HRP ("bq" or "bqt"); unknown HRPs → ErrWrongHRP
 //  3. BIP350 binding rule: the checksum constant used must match the
 //     witness version found in the payload (witver 0 -> Bech32,
 //     witver>=1 -> Bech32m). A mismatch is rejected outright — this is
@@ -179,41 +233,42 @@ func encode(hash []byte) (string, error) {
 //     is not a QOGE P2QPK address.
 //  6. The remaining payload, converted back to 8-bit bytes, must be
 //     exactly AddressLength (32) bytes.
-func decode(addr string) ([]byte, error) {
+func decode(addr string) ([]byte, Network, error) {
 	hrp, payload, constant, err := decodeGeneric(addr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidAddress, err)
+		return nil, Mainnet, fmt.Errorf("%w: %v", ErrInvalidAddress, err)
 	}
-	if hrp != HRP {
-		return nil, fmt.Errorf("%w: got %q", ErrWrongHRP, hrp)
+	net, ok := knownHRPs[hrp]
+	if !ok {
+		return nil, Mainnet, fmt.Errorf("%w: got %q", ErrWrongHRP, hrp)
 	}
 	if len(payload) == 0 {
-		return nil, fmt.Errorf("%w: empty payload", ErrInvalidAddress)
+		return nil, net, fmt.Errorf("%w: empty payload", ErrInvalidAddress)
 	}
 
 	witver := int(payload[0])
 
 	// BIP350 binding rule.
 	if constant != constantForWitnessVersion(witver) {
-		return nil, fmt.Errorf("%w: checksum encoding does not match witness version %d (BIP350)",
+		return nil, net, fmt.Errorf("%w: checksum encoding does not match witness version %d (BIP350)",
 			ErrInvalidAddress, witver)
 	}
 
 	if witver == 1 {
-		return nil, ErrTaprootDetected
+		return nil, net, ErrTaprootDetected
 	}
 	if witver != WitnessVersion {
-		return nil, fmt.Errorf("%w: unexpected witness version %d (want %d)",
+		return nil, net, fmt.Errorf("%w: unexpected witness version %d (want %d)",
 			ErrInvalidAddress, witver, WitnessVersion)
 	}
 
 	decoded, err := bech32.ConvertBits(payload[1:], 5, 8, false)
 	if err != nil {
-		return nil, fmt.Errorf("address: ConvertBits decode failed: %w", err)
+		return nil, net, fmt.Errorf("address: ConvertBits decode failed: %w", err)
 	}
 	if len(decoded) != AddressLength {
-		return nil, fmt.Errorf("%w: decoded length %d (want %d)",
+		return nil, net, fmt.Errorf("%w: decoded length %d (want %d)",
 			ErrInvalidAddress, len(decoded), AddressLength)
 	}
-	return decoded, nil
+	return decoded, net, nil
 }

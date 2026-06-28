@@ -276,6 +276,85 @@ func TestWrongWitnessVersionRejected(t *testing.T) {
 	}
 }
 
+// ─── Network / HRP (Phase F) ──────────────────────────────────────────────────
+
+func TestTestnetHRP(t *testing.T) {
+	if got := Testnet.HRP(); got != "bqt" {
+		t.Errorf("Testnet.HRP() = %q, want %q", got, "bqt")
+	}
+	if got := Mainnet.HRP(); got != "bq" {
+		t.Errorf("Mainnet.HRP() = %q, want %q", got, "bq")
+	}
+	if got := Regtest.HRP(); got != "bq" {
+		t.Errorf("Regtest.HRP() = %q, want %q", got, "bq")
+	}
+}
+
+func TestFromPublicKeyOnNetworkProducesBqtPrefix(t *testing.T) {
+	addr, err := FromPublicKeyOnNetwork(mockPubKey32, Testnet)
+	if err != nil {
+		t.Fatalf("FromPublicKeyOnNetwork(Testnet) failed: %v", err)
+	}
+	if !strings.HasPrefix(addr, "bqt1z") {
+		t.Errorf("testnet address should start with 'bqt1z', got: %s", addr)
+	}
+	t.Logf("Testnet address: %s", addr)
+}
+
+func TestParseAddressDetectsNetwork(t *testing.T) {
+	mainnetAddr, err := FromPublicKeyOnNetwork(mockPubKey32, Mainnet)
+	if err != nil {
+		t.Fatalf("FromPublicKeyOnNetwork(Mainnet): %v", err)
+	}
+	testnetAddr, err := FromPublicKeyOnNetwork(mockPubKey32, Testnet)
+	if err != nil {
+		t.Fatalf("FromPublicKeyOnNetwork(Testnet): %v", err)
+	}
+
+	_, mainnetGot, err := ParseAddress(mainnetAddr)
+	if err != nil {
+		t.Fatalf("ParseAddress(mainnet addr): %v", err)
+	}
+	if mainnetGot != Mainnet {
+		t.Errorf("ParseAddress(mainnet addr) network = %v, want Mainnet", mainnetGot)
+	}
+
+	_, testnetGot, err := ParseAddress(testnetAddr)
+	if err != nil {
+		t.Fatalf("ParseAddress(testnet addr): %v", err)
+	}
+	if testnetGot != Testnet {
+		t.Errorf("ParseAddress(testnet addr) network = %v, want Testnet", testnetGot)
+	}
+}
+
+func TestDecodeForNetworkRejectsCrossNetwork(t *testing.T) {
+	mainnetAddr, err := FromPublicKeyOnNetwork(mockPubKey32, Mainnet)
+	if err != nil {
+		t.Fatalf("FromPublicKeyOnNetwork(Mainnet): %v", err)
+	}
+	testnetAddr, err := FromPublicKeyOnNetwork(mockPubKey32, Testnet)
+	if err != nil {
+		t.Fatalf("FromPublicKeyOnNetwork(Testnet): %v", err)
+	}
+
+	// bqt1z... presented as Mainnet → must fail
+	if _, err := DecodeForNetwork(testnetAddr, Mainnet); err == nil {
+		t.Error("DecodeForNetwork(testnetAddr, Mainnet) should return error")
+	}
+	// bq1z... presented as Testnet → must fail
+	if _, err := DecodeForNetwork(mainnetAddr, Testnet); err == nil {
+		t.Error("DecodeForNetwork(mainnetAddr, Testnet) should return error")
+	}
+	// correct network → must succeed
+	if _, err := DecodeForNetwork(mainnetAddr, Mainnet); err != nil {
+		t.Errorf("DecodeForNetwork(mainnetAddr, Mainnet) unexpected error: %v", err)
+	}
+	if _, err := DecodeForNetwork(testnetAddr, Testnet); err != nil {
+		t.Errorf("DecodeForNetwork(testnetAddr, Testnet) unexpected error: %v", err)
+	}
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // bech32ConvertBits8to5 wraps bech32.ConvertBits(data, 8, 5, true) for test
