@@ -156,5 +156,6 @@ introduce one without re-justifying against this table.
 | `src/script/interpreter.h` | 188-194 | `SigVersion` enum — append `WITNESS_V2_SLHDSA = 4` |
 | `src/script/interpreter.h` | 168-170 | `PrecomputedTransactionData::m_spent_outputs*` |
 | `src/script/interpreter.cpp` | 1478-1538 | `SignatureHashSchnorr` — template for `SignatureHashP2QPK` |
+| `src/rpc/blockchain.cpp` | 1275 | `DeploymentInfo()` — `SoftForkDescPushBack(DEPLOYMENT_P2QPK)` (all chains) |
 
 Line numbers verified 14 June 2026. Phase D complete as of 24 June 2026 (`56a2aed`). Re-verify before Phase F — line numbers drift as the tree changes.
