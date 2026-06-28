@@ -6,12 +6,11 @@ SIP-QOGE-PQC-02 (Phase A).**
 SLH-DSA-SHA2-128f (FIPS 205) signatures | P2QPK single-use addresses (witness v2 / Bech32m) | HNDL defence
 
 > ⚠️ **EXPERIMENTAL — wallet-side core implemented and tested. Consensus-side
-> Phase E (regtest validation) complete — tampered-sig rejected, real SLH-DSA
-> spend accepted and confirmed on-chain. Phase F (public testnet) is next.
+> Phase E (regtest validation) complete. Phase F (public testnet) in progress.
 > DO NOT USE IN PRODUCTION. Phase 3 independent audit is mandatory before any
 > mainnet deployment.**
 
-**Status: 47/47 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real
+**Status: 61/61 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real
 `bq1z...` P2QPK addresses (witness version 2, Bech32m/BIP350), real
 17,088-byte FIPS 205 signatures, end-to-end single-use lifecycle confirmed
 on Ubuntu 24 LTS.
@@ -48,6 +47,10 @@ QOGE address = Bech32m(hrp="bq", witver=2, HASH256(SLH-DSA-pubkey))
 Example:        bq1z9vedkmpvpf3rt7cnjl5zyh4gtc8sum5v0vfx6qqkej77pen8z50qglwrd3
 ```
 
+Testnet addresses use HRP `"bqt"` and produce `bqt1z...` addresses.
+Set `address.DefaultNetwork = address.Testnet` before wallet initialisation
+to generate testnet addresses. Default is `address.Mainnet` (`bq`).
+
 The public key is hidden at rest behind HASH256. It is revealed in the witness field at spend time and remains visible until the spending transaction reaches 101 confirmations (~101 minutes), at which point the private key is destroyed by the wallet (`KeyDestructionMinConfirmations = 101`, coinbase maturity depth). The exposure window does not enable quantum key recovery — SLH-DSA's security does not depend on any problem Shor's algorithm can solve. The single-use model and 101-block destruction window exist to prevent accidental address reuse, which is the actual threat to SLH-DSA's security properties.
 
 **Witness version 2, not 0.** A 32-byte witness-v0 program is defined by
@@ -75,10 +78,10 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | ID    | Milestone                              | Status         | Tests |
 |-------|----------------------------------------|----------------|-------|
 | M1.1  | liboqs-go → FIPS 205 (SLH-DSA-SHA2-128f) | ✅ VALIDATED | `signer` — 7/7 |
-| M1.2  | HASH256 → address derivation           | ✅ VALIDATED   | `address` — 13/13 (was 7/7; +6 from SIP-02 Phase A) |
+| M1.2  | HASH256 → address derivation           | ✅ VALIDATED   | `address` — 17/17 (was 13/13; +4 network tests) |
 | M1.3  | HD index counter + encrypted persist   | ✅ VALIDATED   | `keystore` — 17/17 |
 | M1.4  | Address state machine + invariants     | ✅ VALIDATED   | `keystore` — 17/17 |
-| M1.5  | Key zeroing on confirmation            | ✅ VALIDATED   | `wallet` — 17/17 |
+| M1.5  | Key zeroing on confirmation            | ✅ VALIDATED   | `wallet` — 20/20 |
 | M1.6  | QOGE tx format integration             | 🔴 STUB        | Address format (Phase A) done; consensus (Phase B+) is SIP-QOGE-PQC-02 |
 | M1.7  | Taproot disabled                       | ✅ VALIDATED   | `address` — `TestTaprootRejected` (structural, not heuristic) |
 | M2.1  | Change routing to fresh address        | ✅ VALIDATED   | `wallet` — `TestSignTransactionRejects*` |
@@ -93,7 +96,7 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | C | Sighash sub-spec (SIP-QOGE-PQC-02a) — source investigation and test vector | ✅ **COMPLETE** — all SIP-02a open items resolved; P2QPKSighash `8a17f83e...` computed, cross-validated, and **independently recomputed** by GPT-5.5 Thinking (PASS, 20 June 2026); five Phase D safeguards folded into spec as SIP-02a §7; see [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) |
 | D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ✅ **COMPLETE** (local) — `SignatureHashP2QPK` (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; not pushed (fork+PR deferred per §9) |
 | E | Regtest functional testing | ✅ **COMPLETE** — regtest validation complete — tampered-sig rejected, real SLH-DSA spend accepted and confirmed (`56a2aed` in [QOGE/qogecoin](https://github.com/QOGE/qogecoin)) |
-| F | Public testnet | ⏳ Pending |
+| F | Public testnet | 🔄 **IN PROGRESS** — `DEPLOYMENT_P2QPK` added to `CTestNetParams` (ALWAYS_ACTIVE, bit 3); `bech32_hrp = "bqt"` in node; `address.Network` type + `bqt` HRP support added to Symbiont Wallet address package (`83bbc73`); `p2qpk: active: true` confirmed on testnet and regtest. Pending: Option A liboqs build (`depends/packages/liboqs.mk`), `nRuleChangeActivationThreshold` fix on testnet, public testnet node launch. |
 
 **Important:** addresses produced by this wallet (witver=2) are, on the
 *current, unmodified* Qogecoin network, anyone-can-spend (BIP141 v2-16
@@ -106,13 +109,15 @@ that activation.** See SIP-QOGE-PQC-02 §5.5.
 ## Test Results
 
 ```
-go test ./address/...  -v   →  13/13 PASS  (0.003s)
+go test ./address/...  -v   →  17/17 PASS  (0.003s)
 go test ./signer/...   -v   →   7/7  PASS  (0.177s)
 go test ./keystore/... -v   →  17/17 PASS  (0.177s)
-go test ./wallet/...   -v   →  17/17 PASS  (1.690s)
+go test ./wallet/...   -v   →  20/20 PASS  (1.690s)
 
-TOTAL: 47/47 PASS
+TOTAL: 61/61 PASS
 ```
+
+Address package gained 4 network tests (`TestTestnetHRP`, `TestFromPublicKeyOnNetworkProducesBqtPrefix`, `TestParseAddressDetectsNetwork`, `TestDecodeForNetworkRejectsCrossNetwork`). Wallet package gained 3 tests (`TestOnConfirmationNoOpBelowMinConfirmations`, `TestOnConfirmationFailsForNonPendingAddress`, `TestP2QPKSighashCrossValidationVector`).
 
 Key figures confirmed by the test suite, on real liboqs (built from source,
 `OQS_DIST_BUILD=ON`, `liboqs.so.0.15.0`):
@@ -123,7 +128,7 @@ Key figures confirmed by the test suite, on real liboqs (built from source,
 | Secret key size | 64 bytes | FIPS 205 SLH-DSA-SHA2-128f |
 | Signature size | 17,088 bytes | FIPS 205 SLH-DSA-SHA2-128f |
 | Algorithm identifier (liboqs) | `SLH_DSA_PURE_SHA2_128F` | — |
-| Address HRP | `bq` | Confirmed against qogecoin/qogecoin release notes |
+| Address HRP | `bq` (mainnet/regtest) / `bqt` (testnet) | Confirmed against qogecoin/qogecoin release notes |
 | Address witness version | 2 (P2QPK) | SIP-QOGE-PQC-02 §5.1 |
 | Address encoding | Bech32m (BIP350) | Required for witver≥1 |
 
@@ -321,8 +326,11 @@ for full normative detail.
   tampered-sig spend rejected (`SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH` from
   `OQS_SIG_slh_dsa_pure_sha2_128f_verify`); real SLH-DSA spend accepted and
   confirmed on-chain.
-- Phase F: public testnet — bech32_hrp decision, Option A liboqs build
-  (`depends/packages/liboqs.mk`), BIP9 governance for mainnet activation
+- **Phase F 🔄 IN PROGRESS:** `bech32_hrp = "bqt"` set in node (`89812b7c`);
+  `address.Network` type + `bqt` HRP support added to wallet address package
+  (`83bbc73`). Pending: Option A liboqs build (`depends/packages/liboqs.mk`),
+  `nRuleChangeActivationThreshold` fix on testnet, public testnet node launch,
+  BIP9 governance for mainnet activation.
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
