@@ -226,8 +226,14 @@ go test ./wallet/...   -v   # full integration — slower (~1.7s, 20+ keygens pe
 go run cmd/main.go
 ```
 
-Choose **1** to create a new wallet. **Save the printed seed hex** — this
-experimental version has no recovery path without it (see M1.3 note below).
+Choose **1** to create a new wallet.
+
+> ⚠️ **Backup warning:** Save BOTH the seed hex AND a copy of your
+> `qoge_wallet.db` file. In the current version, the seed alone cannot
+> recover your wallet — key generation is not yet deterministic from
+> the seed (open item M1.3). Loss of the database file means permanent
+> loss of access to your keys, even with the seed.
+
 From the main menu: get a receive address (1), mark it as paid (2), sign a
 message (3), then confirm (4) to retire the address and zero its key.
 

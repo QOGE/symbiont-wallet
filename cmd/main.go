@@ -52,7 +52,11 @@ func main() {
 			}
 			fmt.Printf("\n  ⚠  WRITE DOWN YOUR SEED AND STORE OFFLINE:\n")
 			fmt.Printf("  Seed (hex): %s\n\n", hex.EncodeToString(seed))
-			fmt.Println("  Press ENTER once you have saved the seed securely.")
+			fmt.Println("  ⚠️  IMPORTANT: Save this seed hex securely.")
+			fmt.Println("  ⚠️  Also back up your wallet database file (qoge_wallet.db).")
+			fmt.Println("  ⚠️  The seed ALONE cannot recover your wallet in this version.")
+			fmt.Println("  ⚠️  Both the seed and the database file are required for access.")
+			fmt.Println("  Press ENTER once you have saved the seed and noted the backup requirement.")
 			bufio.NewReader(os.Stdin).ReadString('\n')
 
 			w, err = wallet.New(walletDBPath, seed)
