@@ -147,6 +147,7 @@ introduce one without re-justifying against this table.
 |------|--------|-------------|
 | Mempool standardness | `3262636a0` | P2QPK policy exception in `AreInputsStandard()` and `IsWitnessStandard()` — P2QPK spends now relay through standard mainnet mempools when `DEPLOYMENT_P2QPK` is active |
 | M1.3 backup warning | `2695e38` (symbiont-wallet) | CLI and README updated to clarify seed alone is insufficient for wallet recovery until deterministic keygen is implemented |
+| Audit comment fix (per audit 1) | `061e88ea6` | Maintenance guardrail added above `m_bip341_taproot_ready` gate in `SignatureHashP2QPK` (must not be changed to `m_bip143_segwit_ready` — see SIP-02a §7-D); stale "liboqs stub" comment at witver==2 verify call corrected to reflect real verification |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
 

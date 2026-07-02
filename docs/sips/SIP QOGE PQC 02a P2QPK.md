@@ -327,6 +327,17 @@ tests for:
 `SignatureHashP2QPK` when `!cache.m_bip341_taproot_ready` (or the P2QPK
 equivalent readiness gate) — analogous to the Schnorr path.
 
+**[PARTIALLY RESOLVED — per audit 1, `061e88ea6`]** A maintenance guardrail
+comment has been added directly above the `m_bip341_taproot_ready` gate in
+`SignatureHashP2QPK` explaining why the gate must not be changed to
+`m_bip143_segwit_ready`: a witver-2 spend also sets `m_bip143_segwit_ready`,
+so swapping the gate would let the sighash proceed with default-zero
+`m_spent_amounts_single_hash` / `m_spent_scripts_single_hash`, silently
+bypassing input-amount and spent-script binding — the consensus exploit
+described in item 5 above. The fail-closed behavior is preserved and now
+documented in-code. Full resolution requires the test coverage in items 1–4
+(regtest precompute trigger tests) which remain open.
+
 ### 7-E. Mempool relay and standardness testing is distinct from block validation
 
 Phase E functional testing MUST explicitly verify:
