@@ -8,11 +8,10 @@
 > **Status: CANDIDATE — Phases C through F complete.** All normative
 > safeguards (§7-A through §7-E) implemented and verified. Public testnet
 > live at `167.86.81.222:42070`; P2QPK tx `357d4d0c...` confirmed in block
-> 104. Pre-mainnet: multi-model AI adversarial audit in progress. Mainnet
-> activation pending SAOGEN governance (BIP9 parameters) and audit
-> completion. Note: AI audit has been adopted as the review methodology
-> given project constraints; see audit findings document in `docs/sips/`
-> when complete.
+> 104. **Audit 1 (sighash construction) complete** — test vector
+> `8a17f83e...` independently recomputed by 3 frontier models; no mainnet
+> blocker found; see `Audit_1_Sighash_Construction_Triage.md`. Mainnet
+> activation pending SAOGEN governance (BIP9 parameters).
 
 ## 1. SigVersion::WITNESS_V2_SLHDSA = 4
 
@@ -93,6 +92,13 @@ This is a **strict subset** of BIP341's `SignatureHashSchnorr`
 `ext_flag`/`key_version`/`tapleaf_hash`/codeseparator position. All of those
 are Tapscript-specific and P2QPK has no script tree (SIP-QOGE-PQC-02 §4.2).
 
+**No `spend_type` byte.** BIP341 `SignatureHashSchnorr` includes a
+`spend_type` byte encoding key-path vs script-path and annex presence.
+P2QPK has neither — witness stack is always exactly `[sig, pubkey]`, there
+is no script tree, and no annex. The `spend_type` byte is absent from the
+preimage above. This was confirmed by three independent Audit 1 reviewers
+who each recomputed the test vector to an exact match without it.
+
 **Tagged hash domain**: `HASHER_P2QPKSIGHASH = TaggedHashWriter("P2QPKSighash")`
 — same BIP340 tagged-hash construction as `HASHER_TAPSIGHASH`
 (`"TapSighash"`), different tag string. Guarantees no collision with any
@@ -118,10 +124,25 @@ Deliberately fewer parameters than `SignatureHashSchnorr`: no
 
 ## 5. Explicitly out of scope for v1
 
-- `SIGHASH_ANYONECANPAY`, `SIGHASH_NONE`, `SIGHASH_SINGLE` — would
-  reintroduce per-input/output branching this spec eliminates. If ever
-  needed: new `SigVersion::WITNESS_V2_SLHDSA_EXT = 5` with its own sighash,
-  not an extension of this one.
+**`SIGHASH_ALL` is the only supported hash type. This is a deliberate
+design decision**, not an oversight. Rationale:
+
+1. **Single-use address model.** Each P2QPK address is used exactly once
+   (FRESH → PENDING → SPENT → RETIRED). `SIGHASH_SINGLE` and
+   `SIGHASH_NONE` exist to enable multi-party protocols where parties sign
+   before the full transaction is assembled — a use case that is
+   structurally incompatible with single-use, pre-generated address pools.
+2. **Eliminates sighash-flag replay surfaces.** `SIGHASH_SINGLE`'s
+   "Sighash Single bug" (unsigned outputs beyond `in_pos`) and
+   `SIGHASH_NONE`'s signature-reuse across outputs are well-known attack
+   surfaces. Hardcoding `SIGHASH_ALL` eliminates both.
+3. **Confirmed secure by Audit 1** (Q3 cross-transaction replay: unanimous
+   PASS across three models; Q5 canonicalization: unanimous PASS).
+
+If additional hash types are ever needed: define a new
+`SigVersion::WITNESS_V2_SLHDSA_EXT = 5` with its own sighash function —
+not an extension of this one. Do not add `hash_type` branching here.
+
 - Script-path / multi-leaf spending — P2QPK has no script tree by
   definition.
 - Annex — P2QPK witness stack is fixed at exactly `[sig, pubkey]`
@@ -375,5 +396,35 @@ standard mainnet mempools confirmed working.
 **Phase D gate cleared**: independent cryptographic review PASS (with required safeguards).
 Safeguards A-E have been folded into the spec as normative requirements in §7 (above).
 Phase D implementation complete (`56a2aed`). Phase E regtest validation complete.
-Phase F public testnet complete. Pre-mainnet work: multi-model AI adversarial audit
-in progress; private mainnet simulation planned before BIP9 parameter activation.
+Phase F public testnet complete. **Audit 1 (sighash construction) complete** — no
+mainnet blocker; see `Audit_1_Sighash_Construction_Triage.md`. Mainnet activation
+pending SAOGEN governance (BIP9 parameters) and private mainnet simulation.
+
+## 8. Security notes (from Audit 1)
+
+### Mixed-input transaction malleability (Audit 1 Q1)
+
+A transaction mixing a P2QPK input with a **malleable legacy input** (non-SegWit
+scriptSig) inherits legacy scriptSig malleability. An attacker who controls the
+legacy input can mutate its scriptSig, changing the txid while the P2QPK signature
+on the other input remains valid.
+
+**This does not risk funds.** The attacker cannot redirect outputs, swap P2QPK
+prevouts, or alter amounts. It is txid malleability only — the transaction still
+performs exactly what was signed.
+
+**This is a pre-existing property of all SegWit-derived chains** (including
+Bitcoin). It is inherited from the legacy input, not introduced by P2QPK. A P2QPK
+output's own scriptSig is forced empty by the `!is_p2sh` guard; witness malleation
+does not change the txid. Committing to all scriptSigs would make signatures
+circular (impossible to construct).
+
+**Standard mitigation**: avoid mixing malleable legacy inputs where stable txids
+are required (e.g., pre-signed HTLC chains). The Symbiont Wallet does not
+construct mixed P2QPK/legacy-malleable transactions — the scenario does not arise
+for the wallet's own outputs.
+
+**Verdict matrix from Audit 1:** Opus 4.8 PASS, ChatGPT 5.5 PASS, Codex FAIL
+(narrow — scoped to whole-transaction behavior including mixed legacy inputs).
+All three agree funds are safe. Framing disagreement triaged and documented in
+`Audit_1_Sighash_Construction_Triage.md`. Not a bottleneck for mainnet activation.
