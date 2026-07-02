@@ -94,12 +94,7 @@ branches in `src/script/interpreter.cpp` (currently the catch-all `else` at
 }
 ```
 
-`SLHDSA_PK_LEN = 32`, `SLHDSA_SIG_MAX_LEN = 17088`. This is **illustrative
-pseudocode for Phase D**, not ready to apply — `SignatureHashP2QPK` depends
-on SIP-QOGE-PQC-02a Phase C being resolved first, and the liboqs call
-signature needs checking against the actual liboqs C API
-(`OQS_SIG_slh_dsa_pure_sha2_128f_verify` or via the generic `OQS_SIG` struct
-— Phase B used pkg-config/linking only, didn't touch call sites).
+`SLHDSA_PK_LEN = 32`, `SLHDSA_SIG_MAX_LEN = 17088`. This was the **implementation target for Phase D** — now fully implemented as of commit `56a2aed` in QOGE/qogecoin. See actual code in `src/script/interpreter.cpp`.
 
 ### 3.4 Activation
 
@@ -108,6 +103,10 @@ BIP9-style version-bits deployment, analogous to `DEPLOYMENT_TAPROOT` in
 `SCRIPT_VERIFY_P2QPK` in `script/interpreter.h`'s flags enum. Bit number and
 start/timeout heights: **governance decisions, not cryptographic ones** — do
 not pick these unilaterally; flag for SAOGEN governance when reached.
+
+**Bit 3 has been selected** and used consistently across regtest and testnet
+deployments (`ALWAYS_ACTIVE`). Mainnet `nStartTime`, `nTimeout`, and miner
+signaling window remain SAOGEN governance decisions.
 
 **Pre-activation property** (favorable): P2QPK outputs are anyone-can-spend
 until activation — testing can proceed on a public testnet *before*
@@ -136,11 +135,18 @@ introduce one without re-justifying against this table.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | A | Wallet address format (witver 0->2, Bech32m) | ✅ DONE (symbiont-wallet) |
-| B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only); Option A (`depends/packages/liboqs.mk`, CMake) deferred to Phase F+, see CLAUDE.md and §7-C |
+| B | liboqs integration into Qogecoin Core build | ✅ DONE — Option B (pkg-config, dev-only) for Phase D-E; Option A (`depends/packages/liboqs.mk`, static, `BUILD_TESTING=OFF`, `CMAKE_SYSTEM_PROCESSOR` fix) fully verified (`88c400c59`, `135c2fc0b`) — this is the consensus build path |
 | C | Sighash sub-spec review (SIP-QOGE-PQC-02a open items) | ✅ DONE — all open items resolved; P2QPKSighash `8a17f83e...` independently reviewed (GPT-5.5, PASS); Phase D safeguards A-E folded into spec as §7 |
 | D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ✅ DONE (local) — `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; activation: `DEPLOYMENT_P2QPK` in `DeploymentPos` + `deploymentinfo.cpp` + `CRegTestParams.vDeployments` (`ALWAYS_ACTIVE`); `DeploymentActiveAt` gates `SCRIPT_VERIFY_P2QPK` in `GetBlockScriptFlags` (`56a2aed`) |
 | E | Regtest functional testing | ✅ DONE — regtest validation complete — `DEPLOYMENT_P2QPK` activated (`56a2aed` in QOGE/qogecoin), tampered-sig rejected via `OQS_SIG_slh_dsa_pure_sha2_128f_verify`, real SLH-DSA spend accepted and confirmed in block |
 | F | Public testnet | ✅ COMPLETE — `DEPLOYMENT_P2QPK` in `CTestNetParams` (ALWAYS_ACTIVE, bit 3, `89812b7c`); `bech32_hrp = "bqt"`; `DeploymentInfo()` wired for all chains (`rpc/blockchain.cpp:1275`); `p2qpk: active: true` on testnet and regtest. Consensus safety: `BIP9Deployment` safe defaults + explicit `NEVER_ACTIVE` in `CMainParams`/`CSigNetParams` (`09638b35`, per independent review). `address.Network` + `bqt` HRP in Symbiont Wallet (`83bbc73`). Option A liboqs depends build verified (`88c400c59`, `135c2fc0b`). `nRuleChangeActivationThreshold` fixed to 1512/2016 (`c00f6112d`). Independent BIP9 parameter review (PASS). Public testnet live at `167.86.81.222:42070`; P2QPK tx `357d4d0c...` confirmed in block 104. |
+
+## 7. Post-Phase-F implementation (pre-mainnet)
+
+| Item | Commit | Description |
+|------|--------|-------------|
+| Mempool standardness | `3262636a0` | P2QPK policy exception in `AreInputsStandard()` and `IsWitnessStandard()` — P2QPK spends now relay through standard mainnet mempools when `DEPLOYMENT_P2QPK` is active |
+| M1.3 backup warning | `2695e38` (symbiont-wallet) | CLI and README updated to clarify seed alone is insufficient for wallet recovery until deterministic keygen is implemented |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
 
@@ -158,4 +164,4 @@ introduce one without re-justifying against this table.
 | `src/script/interpreter.cpp` | 1478-1538 | `SignatureHashSchnorr` — template for `SignatureHashP2QPK` |
 | `src/rpc/blockchain.cpp` | 1275 | `DeploymentInfo()` — `SoftForkDescPushBack(DEPLOYMENT_P2QPK)` (all chains) |
 
-Line numbers verified 14 June 2026. Phase D complete as of 24 June 2026 (`56a2aed`). Re-verify before Phase F — line numbers drift as the tree changes.
+Line numbers verified 14 June 2026. Phase D complete (56a2aed, 24 June 2026), Phase F complete (c00f6112d, 28 June 2026). Re-verify before any mainnet activation — line numbers drift as the tree changes. Mempool standardness policy exception added at `src/policy/policy.cpp` (`3262636a0`, 29 June 2026) — not yet reflected in this source index.
