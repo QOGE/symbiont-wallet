@@ -148,6 +148,7 @@ introduce one without re-justifying against this table.
 | Mempool standardness | `3262636a0` | P2QPK policy exception in `AreInputsStandard()` and `IsWitnessStandard()` — P2QPK spends now relay through standard mainnet mempools when `DEPLOYMENT_P2QPK` is active |
 | M1.3 backup warning | `2695e38` (symbiont-wallet) | CLI and README updated to clarify seed alone is insufficient for wallet recovery until deterministic keygen is implemented |
 | Audit comment fix (per audit 1) | `061e88ea6` | Maintenance guardrail added above `m_bip341_taproot_ready` gate in `SignatureHashP2QPK` (must not be changed to `m_bip143_segwit_ready` — see SIP-02a §7-D); stale "liboqs stub" comment at witver==2 verify call corrected to reflect real verification |
+| **Audit 1 complete** (sighash construction) | — | Multi-model audit of `SignatureHashP2QPK` + SIP-02a: Claude Opus 4.8, ChatGPT 5.5, Codex (1–2 July 2026). Test vector `8a17f83e...` independently recomputed to exact match by all three. Core security: unanimous PASS. Q1 malleability (Codex FAIL narrow): acknowledged, fund-safe, documented in SIP-02a §8. No finding is a bottleneck for mainnet activation. Triage: `Audit_1_Sighash_Construction_Triage.md` |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
 
@@ -165,4 +166,4 @@ introduce one without re-justifying against this table.
 | `src/script/interpreter.cpp` | 1478-1538 | `SignatureHashSchnorr` — template for `SignatureHashP2QPK` |
 | `src/rpc/blockchain.cpp` | 1275 | `DeploymentInfo()` — `SoftForkDescPushBack(DEPLOYMENT_P2QPK)` (all chains) |
 
-Line numbers verified 14 June 2026. Phase D complete (56a2aed, 24 June 2026), Phase F complete (c00f6112d, 28 June 2026). Re-verify before any mainnet activation — line numbers drift as the tree changes. Mempool standardness policy exception added at `src/policy/policy.cpp` (`3262636a0`, 29 June 2026) — not yet reflected in this source index.
+Line numbers verified 14 June 2026. Phase D complete (56a2aed, 24 June 2026), Phase F complete (c00f6112d, 28 June 2026). Re-verify before any mainnet activation — line numbers drift as the tree changes. Mempool standardness policy exception added at `src/policy/policy.cpp` (`3262636a0`, 29 June 2026) — not yet reflected in this source index. Audit 1 guardrail comment added above `m_bip341_taproot_ready` gate in `SignatureHashP2QPK` (`061e88ea6`, 2 July 2026) — not yet reflected in this source index.
