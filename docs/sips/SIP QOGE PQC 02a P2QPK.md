@@ -5,16 +5,14 @@
 > **normative construction and open items only** — see the full docx for
 > threat model, governance tables, and rationale prose.
 >
-> **Status: CANDIDATE — Phase C complete. Review gate cleared.** All open
-> items resolved against the real `qogecoin/qogecoin` source. P2QPKSighash
-> test vector `8a17f83e...` computed, cross-validated against the BIP341
-> TapSighash reference, and **independently recomputed** by GPT-5.5 Thinking
-> (20 June 2026, `docs/sips/QOGE_P2QPK_PQC_Independent_Review.md`) — PASS,
-> no fatal sighash flaw found. Five required Phase D safeguards (§7) have been
-> folded into this spec as normative requirements. **Phase D may begin in a
-> future session.** A human Bitcoin/PQC cryptography audit remains mandatory
-> before mainnet activation (SIP-QOGE-PQC-02 §9 — AI review is not a
-> substitute for human review).
+> **Status: CANDIDATE — Phases C through F complete.** All normative
+> safeguards (§7-A through §7-E) implemented and verified. Public testnet
+> live at `167.86.81.222:42070`; P2QPK tx `357d4d0c...` confirmed in block
+> 104. Pre-mainnet: multi-model AI adversarial audit in progress. Mainnet
+> activation pending SAOGEN governance (BIP9 parameters) and audit
+> completion. Note: AI audit has been adopted as the review methodology
+> given project constraints; see audit findings document in `docs/sips/`
+> when complete.
 
 ## 1. SigVersion::WITNESS_V2_SLHDSA = 4
 
@@ -303,6 +301,12 @@ should be completed before any consensus code is merged for relay/mining, not
 just before cross-platform release. Review with SAOGEN before finalizing the
 Phase D/E/F ordering.
 
+**[RESOLVED — Phase F]** Option A (`depends/packages/liboqs.mk`) is fully
+implemented and verified (`88c400c59`, `135c2fc0b` in QOGE/qogecoin).
+Static build, `BUILD_TESTING=OFF`, `CMAKE_SYSTEM_PROCESSOR=$(host_arch)`
+fix included. This is now the consensus build path. Option B (host
+pkg-config) remains available as a dev-only fallback.
+
 ### 7-D. Precompute trigger must be tested
 
 Extending `Init()` from `scriptPubKey[0] == OP_1` to
@@ -341,6 +345,13 @@ SIP-QOGE-PQC-02 §4) accommodates a P2QPK input (~17,150 wu, ~4.3% of limit),
 but `IsStandard()` / `AreInputsStandard()` and the witness item size checks in
 `policy/policy.cpp` must be confirmed to not reject it at the policy layer.
 
+**[RESOLVED — Phase F + `3262636a0`]** P2QPK mempool relay confirmed:
+policy exception implemented in `AreInputsStandard()` and
+`IsWitnessStandard()` (`src/policy/policy.cpp`, commit `3262636a0`).
+P2QPK tx `357d4d0c...` relayed from dev VM to public testnet VPS
+(`167.86.81.222:42070`) and confirmed in block 104. Relay through
+standard mainnet mempools confirmed working.
+
 ---
 
 **Phase C exit criteria**: ✅ All met.
@@ -352,5 +363,6 @@ but `IsStandard()` / `AreInputsStandard()` and the witness item size checks in
 
 **Phase D gate cleared**: independent cryptographic review PASS (with required safeguards).
 Safeguards A-E have been folded into the spec as normative requirements in §7 (above).
-Phase D implementation (`SignatureHashP2QPK` + `VerifyWitnessProgram` witver==2 branch)
-may begin in a future session.
+Phase D implementation complete (`56a2aed`). Phase E regtest validation complete.
+Phase F public testnet complete. Pre-mainnet work: multi-model AI adversarial audit
+in progress; private mainnet simulation planned before BIP9 parameter activation.
