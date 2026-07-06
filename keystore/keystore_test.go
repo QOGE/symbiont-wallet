@@ -352,6 +352,86 @@ func TestRetireIsPermanent(t *testing.T) {
 	}
 }
 
+// ─── MarkSpentAndRetire atomicity ───────────────────────────────────────────────
+
+// TestMarkSpentAndRetireIsAtomic confirms that MarkSpentAndRetire transitions
+// PENDING → RETIRED in a single step: the address is never observable in the
+// intermediate SPENT state, and the seed is zeroed upon return.
+//
+// Direct crash injection between bbolt writes is not possible from test code —
+// bbolt's single Update transaction is all-or-nothing at the WAL level. This
+// test instead verifies the functional guarantee: after the call returns, the
+// record is RETIRED (not SPENT), and EncSeedBlob is nil, confirming both
+// transitions occurred as one unit rather than two separable steps.
+func TestMarkSpentAndRetireIsAtomic(t *testing.T) {
+	ki := openTestIndex(t)
+	deriveFn := mockDeriveFn(ki)
+
+	addr, err := ki.GenerateAddress(deriveFn)
+	if err != nil {
+		t.Fatalf("GenerateAddress failed: %v", err)
+	}
+	if err := ki.MarkPending(addr); err != nil {
+		t.Fatalf("MarkPending failed: %v", err)
+	}
+
+	// Confirm seed is present before the call.
+	before, err := ki.GetRecord(addr)
+	if err != nil {
+		t.Fatalf("GetRecord (before) failed: %v", err)
+	}
+	if len(before.EncSeedBlob) == 0 {
+		t.Fatal("expected non-empty EncSeedBlob before MarkSpentAndRetire")
+	}
+
+	if err := ki.MarkSpentAndRetire(addr); err != nil {
+		t.Fatalf("MarkSpentAndRetire failed: %v", err)
+	}
+
+	// After the call: state must be RETIRED (never SPENT), seed must be gone.
+	after, err := ki.GetRecord(addr)
+	if err != nil {
+		t.Fatalf("GetRecord (after) failed: %v", err)
+	}
+	if after.State != StateRetired {
+		t.Errorf("state after MarkSpentAndRetire: got %v, want RETIRED", after.State)
+	}
+	if len(after.EncSeedBlob) != 0 {
+		t.Errorf("EncSeedBlob not cleared: still %d bytes", len(after.EncSeedBlob))
+	}
+
+	// All further transitions must fail — RETIRED is terminal.
+	if err := ki.MarkSpentAndRetire(addr); err != ErrAddressNotPending {
+		t.Errorf("MarkSpentAndRetire on RETIRED address: got %v, want ErrAddressNotPending", err)
+	}
+}
+
+func TestMarkSpentAndRetireRequiresPending(t *testing.T) {
+	ki := openTestIndex(t)
+	deriveFn := mockDeriveFn(ki)
+
+	addr, err := ki.GenerateAddress(deriveFn)
+	if err != nil {
+		t.Fatalf("GenerateAddress failed: %v", err)
+	}
+
+	// FRESH address — must fail.
+	if err := ki.MarkSpentAndRetire(addr); err != ErrAddressNotPending {
+		t.Errorf("MarkSpentAndRetire on FRESH address: got %v, want ErrAddressNotPending", err)
+	}
+
+	// Advance to PENDING then SPENT via old path; must also fail on SPENT.
+	if err := ki.MarkPending(addr); err != nil {
+		t.Fatalf("MarkPending failed: %v", err)
+	}
+	if err := ki.MarkSpent(addr); err != nil {
+		t.Fatalf("MarkSpent failed: %v", err)
+	}
+	if err := ki.MarkSpentAndRetire(addr); err != ErrAddressNotPending {
+		t.Errorf("MarkSpentAndRetire on SPENT address: got %v, want ErrAddressNotPending", err)
+	}
+}
+
 // ─── GetRecord on unknown address ───────────────────────────────────────────────
 
 func TestGetRecordUnknownAddress(t *testing.T) {

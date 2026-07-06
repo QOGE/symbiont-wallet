@@ -65,7 +65,7 @@ wallet/wallet.go     — Orchestration: wires signer + address + keystore, enfor
 FRESH → PENDING → SPENT → RETIRED (EncSeedBlob zeroed, permanent)
 ```
 
-`keystore.transition()` is the sole state machine executor. Any skip or reversal returns a sentinel error (`ErrAddressAlreadyUsed`, etc.). `wallet.OnConfirmation()` runs MarkSpent + Retire + pool refill atomically.
+`keystore.transition()` is the sole state machine executor. Any skip or reversal returns a sentinel error (`ErrAddressAlreadyUsed`, etc.). `wallet.OnConfirmation()` runs MarkSpent + Retire atomically (single bbolt transaction via `MarkSpentAndRetire`) then refills the pool in a separate operation — pool refill is not part of the atomic write.
 
 ### Encryption
 

@@ -183,11 +183,8 @@ func (w *Wallet) OnConfirmation(addr string, confirmations int) error {
 	if confirmations < keyDestructionMinConfirmations {
 		return nil // not yet mature — do not destroy key
 	}
-	if err := w.index.MarkSpent(addr); err != nil {
-		return fmt.Errorf("wallet: OnConfirmation (MarkSpent): %w", err)
-	}
-	if err := w.index.Retire(addr); err != nil {
-		return fmt.Errorf("wallet: OnConfirmation (Retire): %w", err)
+	if err := w.index.MarkSpentAndRetire(addr); err != nil {
+		return fmt.Errorf("wallet: OnConfirmation (MarkSpentAndRetire): %w", err)
 	}
 	// Refill pool after retirement so we always have addresses ready.
 	if err := w.fillPool(); err != nil {
