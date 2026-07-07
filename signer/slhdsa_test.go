@@ -64,9 +64,9 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 		t.Fatalf("Sign failed: %v", err)
 	}
 
-	t.Logf("Signature length: %d bytes (expect %d for SLH-DSA-SHA2-128f)", len(sig), SignatureSize)
-	if len(sig) > SignatureSize {
-		t.Errorf("signature length %d exceeds expected max %d", len(sig), SignatureSize)
+	t.Logf("Signature length: %d bytes (expect exactly %d for SLH-DSA-SHA2-128f)", len(sig), SignatureSize)
+	if len(sig) != SignatureSize {
+		t.Errorf("signature length %d != expected %d (SLH-DSA-SHA2-128f always produces a fixed-length output)", len(sig), SignatureSize)
 	}
 
 	ok, err := Verify(digest[:], sig, pub)
