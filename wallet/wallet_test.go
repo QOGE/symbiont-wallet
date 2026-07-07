@@ -7,7 +7,7 @@ import (
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
-	"github.com/saogen/qoge-sphincs-wallet/signer"
+	slhdsa "github.com/saogen/qoge-sphincs-wallet/signer"
 )
 
 // NOTE: These tests exercise the full Symbiont Wallet stack, including the
@@ -370,10 +370,10 @@ func TestSignTransactionRejectsUnknownChangeAddress(t *testing.T) {
 
 // ─── Confirmation / key destruction (M1.5) ───────────────────────────────────
 
-// TestOnConfirmationRetiresAndZeroesKey is the core M1.5 test: after
-// confirmation, the address must be RETIRED and its encrypted seed blob
-// must be gone.
-func TestOnConfirmationRetiresAndZeroesKey(t *testing.T) {
+// TestOnConfirmationFlagsWithoutDestroying is the core M1.5 test for the new
+// two-stage model: OnConfirmation at any confirmation depth >= 1 flags the
+// address SPENT but does NOT destroy the key. EncSeedBlob must still be present.
+func TestOnConfirmationFlagsWithoutDestroying(t *testing.T) {
 	w := newTestWallet(t)
 
 	addr, err := w.NextReceiveAddress()
@@ -389,26 +389,25 @@ func TestOnConfirmationRetiresAndZeroesKey(t *testing.T) {
 		t.Fatalf("SignMessage failed: %v", err)
 	}
 
-	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
-		t.Fatalf("OnConfirmation failed: %v", err)
+	// Confirm at low depth — should flag SPENT without destroying key.
+	if err := w.OnConfirmation(addr, 1); err != nil {
+		t.Fatalf("OnConfirmation(1) failed: %v", err)
 	}
 
 	rec, err := w.index.GetRecord(addr)
 	if err != nil {
 		t.Fatalf("GetRecord failed: %v", err)
 	}
-	if rec.State != keystore.StateRetired {
-		t.Errorf("state after OnConfirmation = %s, want RETIRED", rec.State)
+	if rec.State != keystore.StateSpent {
+		t.Errorf("state after OnConfirmation = %s, want SPENT", rec.State)
 	}
-	if rec.EncSeedBlob != nil {
-		t.Error("EncSeedBlob should be nil after OnConfirmation — key must be destroyed")
+	if rec.EncSeedBlob == nil {
+		t.Error("EncSeedBlob should still be present after OnConfirmation — key must not be destroyed")
 	}
 }
 
 // TestOnConfirmationNoOpBelowMinConfirmations verifies that OnConfirmation is a
-// no-op (returns nil, leaves address PENDING) for any confirmations count below
-// KeyDestructionMinConfirmations. Checks 0 and 100 — the boundary just below
-// the threshold.
+// no-op (returns nil, leaves address PENDING) when confirmations < 1.
 func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 	w := newTestWallet(t)
 
@@ -420,7 +419,8 @@ func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
-	for _, confs := range []int{0, KeyDestructionMinConfirmations - 1} {
+	// Only confirmations < 1 (i.e. 0 or negative) are no-ops.
+	for _, confs := range []int{0, -1} {
 		if err := w.OnConfirmation(addr, confs); err != nil {
 			t.Fatalf("OnConfirmation(%d) returned error, want nil no-op: %v", confs, err)
 		}
@@ -429,7 +429,7 @@ func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 			t.Fatalf("GetRecord failed: %v", err)
 		}
 		if rec.State != keystore.StatePending {
-			t.Errorf("confirmations=%d: state = %s, want PENDING (key must not be destroyed yet)",
+			t.Errorf("confirmations=%d: state = %s, want PENDING (not yet confirmed in any block)",
 				confs, rec.State)
 		}
 		if rec.EncSeedBlob == nil {
@@ -447,14 +447,14 @@ func TestOnConfirmationFailsForNonPendingAddress(t *testing.T) {
 	}
 
 	// addr is FRESH, never marked PENDING — OnConfirmation must fail.
-	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err == nil {
+	if err := w.OnConfirmation(addr, 1); err == nil {
 		t.Fatal("OnConfirmation should fail for a non-PENDING address")
 	}
 }
 
-// TestSignMessageAfterRetirementFails confirms that once an address is
-// RETIRED, its key is truly gone — SignMessage cannot resurrect it.
-func TestSignMessageAfterRetirementFails(t *testing.T) {
+// TestSignMessageAfterSpendFails confirms that once an address is SPENT,
+// SignMessage refuses — the address is no longer PENDING.
+func TestSignMessageAfterSpendFails(t *testing.T) {
 	w := newTestWallet(t)
 
 	addr, err := w.NextReceiveAddress()
@@ -464,18 +464,270 @@ func TestSignMessageAfterRetirementFails(t *testing.T) {
 	if err := w.MarkPaymentReceived(addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
-	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
+	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 
 	_, _, err = w.SignMessage(addr, []byte("attempted reuse"))
 	if err == nil {
-		t.Fatal("SignMessage on a RETIRED address should fail")
+		t.Fatal("SignMessage on a SPENT address should fail")
+	}
+}
+
+// ─── PurgeSpentKey ────────────────────────────────────────────────────────────
+
+// TestPurgeSpentKeyRequiresSpentState confirms that PurgeSpentKey rejects
+// addresses that are not in SPENT state (FRESH, PENDING, or RETIRED).
+func TestPurgeSpentKeyRequiresSpentState(t *testing.T) {
+	w := newTestWallet(t)
+
+	addr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+
+	// FRESH — must reject.
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err == nil {
+		t.Fatal("PurgeSpentKey on FRESH address should fail")
+	}
+
+	if err := w.MarkPaymentReceived(addr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+
+	// PENDING — must reject.
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err == nil {
+		t.Fatal("PurgeSpentKey on PENDING address should fail")
+	}
+
+	if err := w.OnConfirmation(addr, 1); err != nil {
+		t.Fatalf("OnConfirmation failed: %v", err)
+	}
+
+	// SPENT — must succeed.
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err != nil {
+		t.Fatalf("PurgeSpentKey on SPENT address failed: %v", err)
+	}
+
+	rec, err := w.index.GetRecord(addr)
+	if err != nil {
+		t.Fatalf("GetRecord failed: %v", err)
+	}
+	if rec.State != keystore.StateRetired {
+		t.Errorf("state after PurgeSpentKey = %s, want RETIRED", rec.State)
+	}
+	if rec.EncSeedBlob != nil {
+		t.Error("EncSeedBlob should be nil after PurgeSpentKey")
+	}
+
+	// RETIRED — must reject (already done, idempotent re-call must fail).
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err == nil {
+		t.Fatal("PurgeSpentKey on already-RETIRED address should fail")
+	}
+}
+
+// TestPurgeSpentKeyRequiresMinConfirmations confirms that PurgeSpentKey rejects
+// the call when the confirmation depth is below keyDestructionMinConfirmations.
+func TestPurgeSpentKeyRequiresMinConfirmations(t *testing.T) {
+	w := newTestWallet(t)
+
+	addr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(addr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	if err := w.OnConfirmation(addr, 1); err != nil {
+		t.Fatalf("OnConfirmation failed: %v", err)
+	}
+
+	// One below the threshold — must reject.
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations-1); err == nil {
+		t.Fatalf("PurgeSpentKey with %d confirmations should fail (threshold %d)",
+			KeyDestructionMinConfirmations-1, KeyDestructionMinConfirmations)
+	}
+
+	// Address must still be SPENT (key not destroyed).
+	rec, err := w.index.GetRecord(addr)
+	if err != nil {
+		t.Fatalf("GetRecord failed: %v", err)
+	}
+	if rec.State != keystore.StateSpent {
+		t.Errorf("state after rejected PurgeSpentKey = %s, want SPENT", rec.State)
+	}
+	if rec.EncSeedBlob == nil {
+		t.Error("EncSeedBlob should still be present after rejected PurgeSpentKey")
+	}
+
+	// At exactly the threshold — must succeed.
+	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err != nil {
+		t.Fatalf("PurgeSpentKey at threshold failed: %v", err)
+	}
+}
+
+// ─── ListPurgeEligibleAddresses ───────────────────────────────────────────────
+
+// TestListPurgeEligibleAddressesFiltersCorrectly confirms that only SPENT
+// addresses meeting the confirmation threshold are returned, and that FRESH,
+// PENDING, and RETIRED addresses are excluded.
+func TestListPurgeEligibleAddressesFiltersCorrectly(t *testing.T) {
+	w := newTestWallet(t)
+
+	// addr1: SPENT, eligible (high confirmations)
+	addr1, _ := w.NextReceiveAddress()
+	w.MarkPaymentReceived(addr1)
+	w.OnConfirmation(addr1, 1)
+
+	// addr2: SPENT, NOT eligible (low confirmations — will return 0)
+	addr2, _ := w.NextReceiveAddress()
+	w.MarkPaymentReceived(addr2)
+	w.OnConfirmation(addr2, 1)
+
+	// addr3: PENDING (not yet confirmed)
+	addr3, _ := w.NextReceiveAddress()
+	w.MarkPaymentReceived(addr3)
+
+	// addr4: FRESH (never touched)
+	addr4, _ := w.NextReceiveAddress()
+	_ = addr4
+
+	// addr5: RETIRED via PurgeSpentKey
+	addr5, _ := w.NextReceiveAddress()
+	w.MarkPaymentReceived(addr5)
+	w.OnConfirmation(addr5, 1)
+	w.PurgeSpentKey(addr5, KeyDestructionMinConfirmations)
+
+	eligible, err := w.ListPurgeEligibleAddresses(func(addr string) int {
+		if addr == addr1 {
+			return KeyDestructionMinConfirmations // eligible
+		}
+		return 0 // not eligible
+	})
+	if err != nil {
+		t.Fatalf("ListPurgeEligibleAddresses failed: %v", err)
+	}
+
+	if len(eligible) != 1 {
+		t.Fatalf("expected 1 eligible address, got %d: %v", len(eligible), eligible)
+	}
+	if eligible[0].Address != addr1 {
+		t.Errorf("eligible address = %s, want %s", eligible[0].Address, addr1)
+	}
+	if eligible[0].Confirmations != KeyDestructionMinConfirmations {
+		t.Errorf("eligible confirmations = %d, want %d", eligible[0].Confirmations, KeyDestructionMinConfirmations)
+	}
+}
+
+// ─── SignP2QPKInput change-output enforcement ─────────────────────────────────
+
+// makeMinimalSpendParams constructs the minimal valid P2QPKSpendParams for
+// signing tests. The sighash parameters are not the focus here — just
+// enough that computeP2QPKSighash doesn't error.
+func makeMinimalSpendParams(fromAddr, changeAddr string) P2QPKSpendParams {
+	return P2QPKSpendParams{
+		NVersion:  1,
+		NLockTime: 0,
+		Inputs: []SpendInput{
+			{Vout: 0, NSequence: 0xffffffff},
+		},
+		SpentUTXOs: []SpentUTXO{
+			{Amount: 100_000, Script: []byte{0x51}},
+		},
+		Outputs: []SpendOutput{
+			{Amount: 99_000, Script: []byte{0x51}},
+		},
+		InputIndex: 0,
+		FromAddr:   fromAddr,
+		ChangeAddr: changeAddr,
+	}
+}
+
+// TestSignP2QPKInputRejectsNonFreshChange confirms that SignP2QPKInput returns
+// an error when the ChangeAddr is not in FRESH state.
+func TestSignP2QPKInputRejectsNonFreshChange(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+
+	// Use fromAddr itself as change — it is PENDING, not FRESH.
+	params := makeMinimalSpendParams(fromAddr, fromAddr)
+	_, _, err = w.SignP2QPKInput(params)
+	if err == nil {
+		t.Fatal("SignP2QPKInput should reject a change address that is not FRESH")
+	}
+}
+
+// TestSignP2QPKInputTransitionsChangeAfterSigning confirms that after a
+// successful SignP2QPKInput, the change address is PENDING (not FRESH),
+// so it cannot be reused as change or receive address on a subsequent tx.
+func TestSignP2QPKInputTransitionsChangeAfterSigning(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+
+	changeAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (change) failed: %v", err)
+	}
+	if changeAddr == fromAddr {
+		t.Fatal("change address must differ from spending address")
+	}
+
+	// Confirm change is FRESH before signing.
+	changeRec, err := w.index.GetRecord(changeAddr)
+	if err != nil {
+		t.Fatalf("GetRecord (change, before) failed: %v", err)
+	}
+	if changeRec.State != keystore.StateFresh {
+		t.Fatalf("change address state before signing = %s, want FRESH", changeRec.State)
+	}
+
+	params := makeMinimalSpendParams(fromAddr, changeAddr)
+	pubKey, sig, err := w.SignP2QPKInput(params)
+	if err != nil {
+		t.Fatalf("SignP2QPKInput failed: %v", err)
+	}
+	if len(pubKey) != 32 {
+		t.Errorf("pubKey length = %d, want 32", len(pubKey))
+	}
+	if len(sig) != slhdsa.SignatureSize {
+		t.Errorf("sig length = %d, want %d", len(sig), slhdsa.SignatureSize)
+	}
+
+	// After signing: change must be PENDING, not FRESH.
+	changeRec, err = w.index.GetRecord(changeAddr)
+	if err != nil {
+		t.Fatalf("GetRecord (change, after) failed: %v", err)
+	}
+	if changeRec.State != keystore.StatePending {
+		t.Errorf("change address state after signing = %s, want PENDING", changeRec.State)
+	}
+
+	// fromAddr must still be PENDING (sign does not advance it).
+	fromRec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatalf("GetRecord (from, after) failed: %v", err)
+	}
+	if fromRec.State != keystore.StatePending {
+		t.Errorf("from address state after signing = %s, want PENDING", fromRec.State)
 	}
 }
 
 // TestOnConfirmationRefillsPool confirms M2.2 pool refill behaviour:
-// after one address is retired, the FRESH pool is topped back up to
+// after one address is spent, the FRESH pool is topped back up to
 // PreGenPoolSize.
 func TestOnConfirmationRefillsPool(t *testing.T) {
 	w := newTestWallet(t)
@@ -505,7 +757,7 @@ func TestOnConfirmationRefillsPool(t *testing.T) {
 		t.Errorf("FRESH count after MarkPaymentReceived = %d, want %d", mid, PreGenPoolSize-1)
 	}
 
-	if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
+	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 
@@ -556,33 +808,48 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 		t.Fatalf("transaction signature invalid: ok=%v err=%v", ok, err)
 	}
 
-	// 3. Confirm: key destroyed, address retired.
-	if err := w.OnConfirmation(receiveAddr, KeyDestructionMinConfirmations); err != nil {
+	// 3. Confirm: flags address SPENT (no key destruction yet).
+	if err := w.OnConfirmation(receiveAddr, 1); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
 	}
 	rec, err := w.index.GetRecord(receiveAddr)
 	if err != nil {
 		t.Fatalf("GetRecord failed: %v", err)
 	}
+	if rec.State != keystore.StateSpent {
+		t.Fatalf("receive address state after OnConfirmation = %s, want SPENT", rec.State)
+	}
+	if rec.EncSeedBlob == nil {
+		t.Fatal("EncSeedBlob should still be present after OnConfirmation (key not yet destroyed)")
+	}
+
+	// 3b. Explicitly purge the key once deeply confirmed.
+	if err := w.PurgeSpentKey(receiveAddr, KeyDestructionMinConfirmations); err != nil {
+		t.Fatalf("PurgeSpentKey failed: %v", err)
+	}
+	rec, err = w.index.GetRecord(receiveAddr)
+	if err != nil {
+		t.Fatalf("GetRecord (after purge) failed: %v", err)
+	}
 	if rec.State != keystore.StateRetired || rec.EncSeedBlob != nil {
-		t.Fatalf("receive address not properly retired: state=%s, encSeed=%v",
+		t.Fatalf("receive address not properly retired after PurgeSpentKey: state=%s, encSeed=%v",
 			rec.State, rec.EncSeedBlob != nil)
 	}
 
-	// 4. The retired address must never be handed out again.
+	// 4. The spent/retired address must never be handed out again.
 	for i := 0; i < PreGenPoolSize*2; i++ {
 		addr, err := w.NextReceiveAddress()
 		if err != nil {
 			t.Fatalf("NextReceiveAddress failed: %v", err)
 		}
 		if addr == receiveAddr {
-			t.Fatal("retired address was returned by NextReceiveAddress — single-use invariant violated")
+			t.Fatal("spent address was returned by NextReceiveAddress — single-use invariant violated")
 		}
 		// Use it up so the loop advances to the next FRESH address.
 		if err := w.MarkPaymentReceived(addr); err != nil {
 			t.Fatalf("MarkPaymentReceived failed: %v", err)
 		}
-		if err := w.OnConfirmation(addr, KeyDestructionMinConfirmations); err != nil {
+		if err := w.OnConfirmation(addr, 1); err != nil {
 			t.Fatalf("OnConfirmation failed: %v", err)
 		}
 	}

@@ -12,10 +12,12 @@
 // SIP-QOGE-PQC-01 compliance checkpoints (all enforced here):
 //   [M1.3] HD index counter with encrypted persistence
 //   [M1.4] Address state machine with hard invariants
-//   [M1.5] Secure key zeroing on 1-confirmation callback
+//   [M1.5] Reuse prevention: OnConfirmation flags SPENT at ≥1 confirmation.
+//          Key destruction is separate, optional, manual — see PurgeSpentKey.
 //   [M1.6] Integration point for QOGE chain tx format (see SignTransaction)
 //   [M1.7] Taproot disabled — enforced in address package; double-checked here
-//   [M2.1] Change routing to next fresh address
+//   [M2.1] Change routing: SignP2QPKInput and SignTransaction enforce FRESH
+//          change address before signing and transition it PENDING after.
 //   [M2.2] Address pre-generation pool (N=20)
 package wallet
 
@@ -23,6 +25,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -31,6 +34,11 @@ import (
 	"github.com/saogen/qoge-sphincs-wallet/signer"
 	"golang.org/x/crypto/hkdf"
 )
+
+// ErrChangeAddressNotFresh is returned by SignP2QPKInput and SignTransaction
+// when the designated change address is not in FRESH state in this wallet's
+// index. Change MUST route to a new, unused wallet-controlled address.
+var ErrChangeAddressNotFresh = errors.New("wallet: change address is not FRESH — change must route to a new unused wallet address")
 
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
 // M2.2: pre-generate 20 addresses on init and after each spend.
@@ -41,16 +49,19 @@ const PreGenPoolSize = 20
 // cross-protocol signature reuse.
 const MessagePrefix = "Qogecoin Signed Message:"
 
-// KeyDestructionMinConfirmations is the minimum number of block confirmations
-// required before OnConfirmation() will destroy a P2QPK private key.
+// KeyDestructionMinConfirmations is the minimum confirmation depth required
+// before PurgeSpentKey() will destroy a P2QPK private key.
 //
 // Set to 101 — Qogecoin's coinbase maturity depth — which represents the
 // network's own standard for permanent transaction settlement. Key destruction
 // at this depth is not a security requirement (the single-use address model
-// provides HNDL protection regardless) but an operational safeguard that makes
-// accidental address reuse structurally impossible once a transaction is
-// mature. A reorg of this depth would constitute catastrophic chain failure,
-// not routine operation.
+// provides HNDL protection regardless) but a safety floor for this
+// irreversible, optional action: a reorg of this depth would constitute
+// catastrophic chain failure, not routine operation.
+//
+// Note: OnConfirmation() does NOT use this threshold. It flags addresses
+// SPENT at any confirmation depth (>= 1) for reuse prevention. Key
+// destruction is a separate, explicitly-invoked action via PurgeSpentKey().
 //
 // Applications MAY increase this value via SetKeyDestructionMinConfirmations()
 // but SHOULD NOT decrease it below 101 in production.
@@ -60,8 +71,8 @@ const KeyDestructionMinConfirmations = 101
 var keyDestructionMinConfirmations = KeyDestructionMinConfirmations
 
 // SetKeyDestructionMinConfirmations overrides the default confirmation threshold
-// for key destruction. Must be called before any OnConfirmation() call.
-// Values below 1 are silently ignored. Production use SHOULD NOT set below 101.
+// for PurgeSpentKey(). Values below 1 are silently ignored.
+// Production use SHOULD NOT set below 101.
 func SetKeyDestructionMinConfirmations(n int) {
 	if n >= 1 {
 		keyDestructionMinConfirmations = n
@@ -166,32 +177,83 @@ func (w *Wallet) MarkPaymentReceived(addr string) error {
 	return nil
 }
 
-// OnConfirmation retires the address and zeros its private key once the
-// spending transaction reaches keyDestructionMinConfirmations depth.
-// Returns nil (no-op) if confirmations < keyDestructionMinConfirmations.
-// The caller is responsible for tracking confirmation depth — do not call
-// this until the transaction has reached the required depth.
+// OnConfirmation flags addr SPENT once its spending transaction has at least
+// one confirmation. Returns nil (no-op) if confirmations < 1.
 //
-// When confirmations >= keyDestructionMinConfirmations it:
-//  1. Transitions addr PENDING → SPENT
-//  2. Transitions addr SPENT → RETIRED (zeros the private key seed)
-//  3. Refills the pre-generation pool (M2.2)
+// This prevents address reuse immediately on confirmation — it does NOT destroy
+// the private key. Key destruction is a separate, optional, irreversible action
+// via PurgeSpentKey(), invoked at the integrator's or user's discretion.
 //
-// M1.5 MILESTONE: This is the key destruction callback.
-// Wire this to the QOGE chain's block notification system.
+// M1.5 MILESTONE: Wire this to the QOGE chain's block notification system.
 func (w *Wallet) OnConfirmation(addr string, confirmations int) error {
-	if confirmations < keyDestructionMinConfirmations {
-		return nil // not yet mature — do not destroy key
+	if confirmations < 1 {
+		return nil // not yet confirmed in any block
 	}
-	if err := w.index.MarkSpentAndRetire(addr); err != nil {
-		return fmt.Errorf("wallet: OnConfirmation (MarkSpentAndRetire): %w", err)
+	if err := w.index.MarkSpent(addr); err != nil {
+		return fmt.Errorf("wallet: OnConfirmation (MarkSpent): %w", err)
 	}
-	// Refill pool after retirement so we always have addresses ready.
+	// Refill pool after spend so we always have addresses ready.
 	if err := w.fillPool(); err != nil {
 		// Non-fatal: log but don't return error; the confirmation already succeeded.
 		fmt.Printf("wallet: WARNING pool refill failed after confirmation: %v\n", err)
 	}
 	return nil
+}
+
+// PurgeSpentKey permanently destroys the private key for a SPENT address.
+// This is OPTIONAL, MANUAL, and IRREVERSIBLE. It is never called
+// automatically by any wallet-internal logic. Calling this (or not, and
+// when) is entirely the integrator's or end user's decision and
+// responsibility — the wallet library takes no position on whether keys
+// should ever be destroyed.
+//
+// Requires addr to be in SPENT state and confirmations to be at least
+// keyDestructionMinConfirmations (default 101). The confirmation floor is
+// a safety guard for this now-optional, irreversible action — not an
+// automatic trigger.
+func (w *Wallet) PurgeSpentKey(addr string, confirmations int) error {
+	if confirmations < keyDestructionMinConfirmations {
+		return fmt.Errorf("wallet: PurgeSpentKey: confirmations %d below minimum %d",
+			confirmations, keyDestructionMinConfirmations)
+	}
+	if err := w.index.Retire(addr); err != nil {
+		return fmt.Errorf("wallet: PurgeSpentKey (Retire): %w", err)
+	}
+	return nil
+}
+
+// ─── Purge-eligibility scan ───────────────────────────────────────────────────
+
+// PurgeEligibleAddress describes a SPENT address that is a reasonable
+// candidate for key destruction via PurgeSpentKey.
+type PurgeEligibleAddress struct {
+	Address       string
+	Confirmations int // as of the chain height supplied by the caller
+}
+
+// ListPurgeEligibleAddresses returns SPENT addresses for which confirmationsFor
+// reports at least keyDestructionMinConfirmations confirmations. This is
+// advisory only — it does not purge anything. The caller (CLI, application,
+// end user) decides whether to act on any entry via PurgeSpentKey.
+//
+// confirmationsFor is supplied by the caller because this wallet package does
+// not itself track chain state. It is called once per SPENT address.
+func (w *Wallet) ListPurgeEligibleAddresses(confirmationsFor func(addr string) int) ([]PurgeEligibleAddress, error) {
+	records, err := w.index.ListByState(keystore.StateSpent)
+	if err != nil {
+		return nil, fmt.Errorf("wallet: ListPurgeEligibleAddresses: %w", err)
+	}
+	var eligible []PurgeEligibleAddress
+	for _, rec := range records {
+		confs := confirmationsFor(rec.Address)
+		if confs >= keyDestructionMinConfirmations {
+			eligible = append(eligible, PurgeEligibleAddress{
+				Address:       rec.Address,
+				Confirmations: confs,
+			})
+		}
+	}
+	return eligible, nil
 }
 
 // ─── Signing ──────────────────────────────────────────────────────────────────
@@ -262,6 +324,11 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 	pubKey, sig, err := w.SignMessage(tx.From, tx.MessageID)
 	if err != nil {
 		return nil, err
+	}
+
+	// M2.1: transition change FRESH → PENDING only after signing succeeds.
+	if err := w.index.MarkPending(tx.Change); err != nil {
+		return nil, fmt.Errorf("wallet: SignTransaction: mark change PENDING: %w", err)
 	}
 
 	return &SignedTransaction{
@@ -403,11 +470,14 @@ type P2QPKSpendParams struct {
 	Outputs    []SpendOutput
 	InputIndex uint32 // index of the input being signed
 	FromAddr   string // must be in PENDING state in the wallet index
+	ChangeAddr string // must be a FRESH wallet-controlled address; transitioned to PENDING after signing
 }
 
 // SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
-// params.FromAddr must be in PENDING state. Returns the SLH-DSA public key
-// (32 bytes) and signature (17,088 bytes).
+// params.FromAddr must be in PENDING state. params.ChangeAddr must be a
+// FRESH wallet-controlled address; it is transitioned to PENDING after a
+// successful sign so it cannot be reused as change or receive address.
+// Returns the SLH-DSA public key (32 bytes) and signature (17,088 bytes).
 // The message signed is the 32-byte P2QPKSighash — NOT canonicalMessageHash,
 // which is only for the CLI generic message-signing demo (Open Item 4).
 func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, err error) {
@@ -418,6 +488,17 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	if rec.State != keystore.StatePending {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want PENDING)",
 			params.FromAddr, rec.State)
+	}
+
+	// M2.1: validate change routes to a FRESH wallet-controlled address before signing.
+	changeRec, err := w.index.GetRecord(params.ChangeAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: change address not in wallet index — "+
+			"change MUST route to a fresh wallet address: %w", err)
+	}
+	if changeRec.State != keystore.StateFresh {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
+			ErrChangeAddressNotFresh, changeRec.State)
 	}
 
 	sighash, err := computeP2QPKSighash(params)
@@ -441,6 +522,13 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	signature, err := s.Sign(sighash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sign: %w", err)
+	}
+
+	// M2.1: transition change FRESH → PENDING only after signing succeeds.
+	// This prevents the change address from ever being reused as a receive or
+	// change address on a subsequent transaction.
+	if err := w.index.MarkPending(params.ChangeAddr); err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: mark change PENDING: %w", err)
 	}
 
 	return rec.PublicKey, signature, nil

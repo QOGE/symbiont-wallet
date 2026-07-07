@@ -372,6 +372,27 @@ func (ki *KeyIndex) GetRecord(addr string) (*AddressRecord, error) {
 	return result, err
 }
 
+// ListByState returns all AddressRecords in the given state, ordered by index.
+func (ki *KeyIndex) ListByState(state AddressState) ([]AddressRecord, error) {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+
+	var results []AddressRecord
+	err := ki.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAddresses).ForEach(func(_, v []byte) error {
+			var rec AddressRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.State == state {
+				results = append(results, rec)
+			}
+			return nil
+		})
+	})
+	return results, err
+}
+
 // CountByState returns the number of records in the given state.
 func (ki *KeyIndex) CountByState(state AddressState) (int, error) {
 	ki.mu.Lock()

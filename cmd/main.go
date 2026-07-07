@@ -98,8 +98,10 @@ mainMenu:
 		fmt.Println("  1. Get next receive address")
 		fmt.Println("  2. Mark payment received (FRESH → PENDING)")
 		fmt.Println("  3. Sign message")
-		fmt.Println("  4. Simulate confirmation (PENDING → RETIRED + key zero)")
-		fmt.Println("  5. Exit")
+		fmt.Println("  4. Simulate confirmation (PENDING → SPENT, flags address used)")
+		fmt.Println("  5. List addresses eligible for key purging")
+		fmt.Println("  6. Purge key for a SPENT address (PERMANENT — cannot be undone)")
+		fmt.Println("  7. Exit")
 		choice := promptChoice()
 
 		switch choice {
@@ -147,17 +149,60 @@ mainMenu:
 
 		case "4":
 			// Simulates the QOGE chain calling OnConfirmation after a spend tx confirms.
-			// In production this is triggered by the chain's block notification, not the CLI.
-			fmt.Print("  Enter address to confirm (mark SPENT → RETIRED, zero key): ")
+			// Flags the address SPENT (prevents reuse) — does NOT destroy the private key.
+			// Use option 6 to destroy the key when ready.
+			fmt.Print("  Enter address to confirm (flags SPENT, no key destruction): ")
 			addr := strings.TrimSpace(prompt())
-			if err := w.OnConfirmation(addr, wallet.KeyDestructionMinConfirmations); err != nil {
+			if err := w.OnConfirmation(addr, 1); err != nil {
 				fmt.Printf("  ✗ Error: %v\n", err)
 				continue
 			}
-			fmt.Println("  ✓ Address RETIRED. Private key zeroed from memory and storage.")
+			fmt.Println("  ✓ Address flagged SPENT. Private key still present.")
 			fmt.Println("    Address pool refilled with fresh pre-generated addresses.")
+			fmt.Println("    Use option 5 to check eligibility and option 6 to purge the key.")
 
 		case "5":
+			// Advisory scan — shows SPENT addresses eligible for key destruction.
+			// Does not purge anything.
+			eligible, err := w.ListPurgeEligibleAddresses(func(_ string) int {
+				// In the CLI demo, we have no live chain height — report all SPENT addresses
+				// as eligible by returning the minimum threshold. In production, wire this
+				// to the chain's confirmation-depth query.
+				return wallet.KeyDestructionMinConfirmations
+			})
+			if err != nil {
+				fmt.Printf("  ✗ Error: %v\n", err)
+				continue
+			}
+			if len(eligible) == 0 {
+				fmt.Println("  No SPENT addresses have reached the purge eligibility threshold yet.")
+			} else {
+				fmt.Printf("\n  The following %d address(es) are SPENT and eligible for key purging.\n", len(eligible))
+				fmt.Printf("  Use option 6 to purge any of them. This cannot be undone.\n\n")
+				for i, e := range eligible {
+					fmt.Printf("    [%d] %s  (%d confirmations)\n", i+1, e.Address, e.Confirmations)
+				}
+			}
+
+		case "6":
+			// Permanently destroys the private key for a SPENT address.
+			// This action is IRREVERSIBLE and optional — the wallet works normally
+			// without ever purging keys.
+			fmt.Println("  ⚠  WARNING: key purging is PERMANENT and CANNOT be undone.")
+			fmt.Println("  ⚠  Only do this if you are certain the spending transaction is deeply confirmed.")
+			fmt.Print("  Enter SPENT address to purge key for (or ENTER to cancel): ")
+			addr := strings.TrimSpace(prompt())
+			if addr == "" {
+				fmt.Println("  Cancelled.")
+				continue
+			}
+			if err := w.PurgeSpentKey(addr, wallet.KeyDestructionMinConfirmations); err != nil {
+				fmt.Printf("  ✗ Error: %v\n", err)
+				continue
+			}
+			fmt.Println("  ✓ Key PURGED. Private key zeroed from memory and storage. This is permanent.")
+
+		case "7":
 			fmt.Println("  Closing wallet (zeroing sensitive memory)...")
 			os.Exit(0)
 
