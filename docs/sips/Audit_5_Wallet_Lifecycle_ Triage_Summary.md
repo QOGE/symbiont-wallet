@@ -102,29 +102,40 @@ supplied after only checking wallet-side state (that `FromAddr` is
 `PENDING`) — it does not verify that `SpentUTXOs[InputIndex]`'s
 `scriptPubKey` actually corresponds to `FromAddr` before signing.
 
-**Triage disposition: CONFIRMED — OPEN, NOT YET FIXED.**
+**Triage disposition: CONFIRMED — FIXED (`4f80192`).**
 
-Verified via direct code inspection: `wallet.go:416-449` looks up
-`FromAddr` in the keystore and checks `StatePending`, then computes the
-sighash (which does commit to `SpentUTXOs[InputIndex]` via
-`hashScriptPubkeys`) and signs it — without ever cross-checking that the
-`scriptPubKey` at `InputIndex` actually matches the address being signed
-from.
+Verified via direct code inspection: `wallet.go` looked up `FromAddr`
+in the keystore and checked `StatePending`, then computed the sighash
+(which commits to `SpentUTXOs[InputIndex]` via `hashScriptPubkeys`) and
+signed it — without cross-checking that the `scriptPubKey` at
+`InputIndex` matched the address being signed from.
 
 **Impact:** a caller bug supplying a mismatched `FromAddr`/`SpentUTXOs`
 pair would produce a signature that is not silently accepted — the
 resulting transaction would fail on-chain, since the sighash commits to
 the actual (mismatched) `scriptPubKey`. This is not a fund-loss bug today
 because nothing currently calls `SignP2QPKInput` with real chain data
-(M1.6/`SignTransaction` remains a stub). It becomes a real safety concern
-once M1.6 is wired to production transaction construction, where a caller
-bug could otherwise fail silently at signing time rather than loudly and
-immediately.
+(M1.6/`SignTransaction` remains a stub), but it becomes a real safety
+concern once M1.6 is wired to production transaction construction.
 
-**Status: deferred to a future session.** Recommended fix: before signing,
-derive the expected P2QPK script/program from the keystore record's
-`PublicKey` and require it match `SpentUTXOs[InputIndex].Script`, failing
-loudly if not.
+**Fix applied (`4f80192`):** `SignP2QPKInput` now calls
+`p2qpkScriptPubKey(params.FromAddr)` (reusing the helper introduced for
+the change-output binding check in `e1df1b5`) and compares the result
+against `params.SpentUTXOs[params.InputIndex].Script`. A bounds check on
+`InputIndex` vs `len(SpentUTXOs)` is also applied. Mismatch returns
+`ErrFromAddrScriptMismatch`. The check is placed after the PENDING state
+check and before the change-address checks.
+
+Two test fixtures corrected in `wallet_test.go`: `makeMinimalSpendParams`
+and `makeMinimalSpendParamsNoChangeOutput` both used `[]byte{0x51}` (OP_1)
+as `SpentUTXOs[0].Script`; both now derive the correct P2QPK scriptPubKey
+for `fromAddr` via `address.ToHash`. `makeMinimalSpendParamsNoChangeOutput`
+gained a `t *testing.T` parameter.
+
+New test: `TestSignP2QPKInputRejectsMismatchedFromScript` — constructs
+valid params, overwrites `SpentUTXOs[0].Script` with OP_1, asserts
+`ErrFromAddrScriptMismatch` and confirms `fromAddr` remains PENDING after
+rejection. 68/68 tests pass.
 
 ---
 
@@ -134,13 +145,10 @@ loudly if not.
 |---|---|---|
 | 1 — Address reservation | False positive | None — confirmed intended, tested, documented |
 | 2 — Retirement atomicity | Confirmed | Fixed (`b093d0f`), 2 new tests, CLAUDE.md corrected |
-| 3 — SignP2QPKInput cross-check | Confirmed | Open — deferred, not urgent until M1.6 |
+| 3 — SignP2QPKInput cross-check | Confirmed | Fixed (`4f80192`), 1 new test, 2 fixtures corrected |
 
-**Audit 5 overall: one real bug found and fixed, one false positive
-correctly ruled out via verification against existing tests/docs, one
-real but lower-urgency finding deferred.** Not a bottleneck for mainnet
-activation — Finding 2 is resolved and Finding 3 does not affect any
-currently-active code path.
+**Audit 5 overall: all three findings resolved.** One false positive
+correctly ruled out; two real bugs confirmed and fixed. 68/68 tests pass.
 
 ---
 
