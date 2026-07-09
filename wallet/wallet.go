@@ -75,19 +75,22 @@ const MessagePrefix = "Qogecoin Signed Message:"
 // destruction is a separate, explicitly-invoked action via PurgeSpentKey().
 //
 // Applications MAY increase this value via SetKeyDestructionMinConfirmations()
-// but SHOULD NOT decrease it below 101 in production.
+// but cannot decrease it below 101 — the setter enforces this floor in code.
 const KeyDestructionMinConfirmations = 101
 
 // keyDestructionMinConfirmations is the runtime value, defaulting to the constant.
 var keyDestructionMinConfirmations = KeyDestructionMinConfirmations
 
-// SetKeyDestructionMinConfirmations overrides the default confirmation threshold
-// for PurgeSpentKey(). Values below 1 are silently ignored.
-// Production use SHOULD NOT set below 101.
-func SetKeyDestructionMinConfirmations(n int) {
-	if n >= 1 {
-		keyDestructionMinConfirmations = n
+// SetKeyDestructionMinConfirmations overrides the confirmation threshold for
+// PurgeSpentKey(). Values below KeyDestructionMinConfirmations (101) are
+// rejected with an error — callers may increase the threshold but not lower it.
+func SetKeyDestructionMinConfirmations(n int) error {
+	if n < KeyDestructionMinConfirmations {
+		return fmt.Errorf("wallet: SetKeyDestructionMinConfirmations: %d is below the enforced minimum %d",
+			n, KeyDestructionMinConfirmations)
 	}
+	keyDestructionMinConfirmations = n
+	return nil
 }
 
 // ─── QOGETransaction (stub) ───────────────────────────────────────────────────
