@@ -200,7 +200,12 @@ mainMenu:
 				fmt.Printf("  ✗ Error: %v\n", err)
 				continue
 			}
-			fmt.Println("  ✓ Key PURGED. Private key zeroed from memory and storage. This is permanent.")
+			fmt.Println("  ✓ Key PURGED. Private key zeroed in memory and the database record.")
+			fmt.Println("    Note: bbolt uses copy-on-write storage — old pages may persist on disk")
+			fmt.Println("    until overwritten during compaction. The seed is encrypted at rest, so")
+			fmt.Println("    residual pages do not expose the raw key. Full removal requires")
+			fmt.Println("    compaction or secure erasure of the database file.")
+			fmt.Println("    This purge cannot be undone.")
 
 		case "7":
 			fmt.Println("  Closing wallet (zeroing sensitive memory)...")
