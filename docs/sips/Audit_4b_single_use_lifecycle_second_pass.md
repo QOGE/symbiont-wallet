@@ -17,11 +17,11 @@ Audit 4.
 **Reviewed at:** `b5e757d` (post-Audit-4 redesign). One cleanup applied in this
 session: `wallet_test.go` sig-length check (`>` → `!=`) — see Q9 below.
 
-**Post-audit fixes (three-pass convergence, same session):** Three of four
+**Post-audit fixes (three-pass convergence + Audit 5 follow-up):** Three of four
 informational items subsequently resolved — see "Post-audit dispositions" section
-at the end. One additional finding surfaced by three-pass convergence that was not
-caught in this pass (change-output binding in `SignP2QPKInput`) — also documented
-there.
+at the end. Two additional findings surfaced after this pass that were not caught
+here (change-output binding in `SignP2QPKInput`; FromAddr/SpentUTXO script
+cross-check) — both documented in the post-audit section.
 
 ---
 
@@ -182,6 +182,18 @@ Helper `p2qpkScriptPubKey` added to wallet.go. Test
 from "zeroed from memory and storage" to accurately describe bbolt copy-on-write
 semantics — old pages may persist until compaction, but the seed is encrypted at
 rest so residual pages do not expose the raw key.
+
+**`SignP2QPKInput` FromAddr/SpentUTXO cross-check — NOT caught by this pass (commit `4f80192`):**
+`SignP2QPKInput` checked that `FromAddr` was PENDING but did not verify that
+`SpentUTXOs[InputIndex].Script` matched the P2QPK scriptPubKey for that address.
+A caller supplying a mismatched UTXO script would produce a signature that fails
+on-chain while consuming the address's wallet state. Surfaced by Audit 5 (Codex
+CLI, 6 July 2026); fixed in a subsequent session. Fix: `p2qpkScriptPubKey(params.FromAddr)`
+(reusing the helper from `e1df1b5`) compared against `params.SpentUTXOs[params.InputIndex].Script`;
+`ErrFromAddrScriptMismatch` returned on mismatch; `InputIndex` bounds-checked
+against `SpentUTXOs` length. Two test fixtures corrected (`makeMinimalSpendParams`,
+`makeMinimalSpendParamsNoChangeOutput` both used OP_1 as the UTXO script).
+New test: `TestSignP2QPKInputRejectsMismatchedFromScript`. 68/68 tests pass.
 
 ---
 
