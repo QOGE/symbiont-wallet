@@ -22,6 +22,7 @@
 package wallet
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -39,6 +40,16 @@ import (
 // when the designated change address is not in FRESH state in this wallet's
 // index. Change MUST route to a new, unused wallet-controlled address.
 var ErrChangeAddressNotFresh = errors.New("wallet: change address is not FRESH — change must route to a new unused wallet address")
+
+// ErrChangeOutputMissing is returned when no output in the transaction pays
+// to the designated change address. A signed transaction must include the
+// change output it committed to — absent it, the change output could be
+// swapped out after signing.
+var ErrChangeOutputMissing = errors.New("wallet: no output script pays to the change address — change output must be present in the transaction before signing")
+
+// ErrChangeOutputAmbiguous is returned when more than one output pays to the
+// change address. Change must route to exactly one output.
+var ErrChangeOutputAmbiguous = errors.New("wallet: multiple outputs pay to the change address — change must route to exactly one output")
 
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
 // M2.2: pre-generate 20 addresses on init and after each spend.
@@ -87,11 +98,12 @@ func SetKeyDestructionMinConfirmations(n int) {
 // type once the chain's wire format is defined. The SignTransaction method
 // below shows the integration pattern.
 type QOGETransaction struct {
-	From      string // Sender address (must be PENDING in index)
-	To        string // Recipient address
-	Amount    uint64 // In QOGE base units
-	Change    string // Change address — MUST be a fresh address from this wallet
-	MessageID []byte // Canonical tx hash for signing (set by chain layer)
+	From      string        // Sender address (must be PENDING in index)
+	To        string        // Recipient address
+	Amount    uint64        // In QOGE base units
+	Change    string        // Change address — MUST be a fresh address from this wallet
+	Outputs   []SpendOutput // All transaction outputs; exactly one must pay to Change
+	MessageID []byte        // Canonical tx hash for signing (set by chain layer)
 }
 
 // SignedTransaction carries the signed tx and the raw SLH-DSA signature.
@@ -320,6 +332,24 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 			"INVARIANT VIOLATION: change must route to a new unused address", changeRec.State)
 	}
 
+	// M2.1: verify exactly one output pays to the change address.
+	changeScript, err := p2qpkScriptPubKey(tx.Change)
+	if err != nil {
+		return nil, fmt.Errorf("wallet: SignTransaction: %w", err)
+	}
+	changeMatches := 0
+	for _, out := range tx.Outputs {
+		if bytes.Equal(out.Script, changeScript) {
+			changeMatches++
+		}
+	}
+	if changeMatches == 0 {
+		return nil, fmt.Errorf("wallet: SignTransaction: %w", ErrChangeOutputMissing)
+	}
+	if changeMatches > 1 {
+		return nil, fmt.Errorf("wallet: SignTransaction: %w", ErrChangeOutputAmbiguous)
+	}
+
 	// Sign the transaction message hash.
 	pubKey, sig, err := w.SignMessage(tx.From, tx.MessageID)
 	if err != nil {
@@ -473,6 +503,23 @@ type P2QPKSpendParams struct {
 	ChangeAddr string // must be a FRESH wallet-controlled address; transitioned to PENDING after signing
 }
 
+// p2qpkScriptPubKey derives the P2QPK scriptPubKey for addr.
+// Script format: OP_2 (0x52) | PUSH32 (0x20) | HASH256(pubkey) — 34 bytes.
+// This is the witness-v2 program commitment as it appears in a transaction
+// output's scriptPubKey field, mirroring how qogecoin/interpreter.cpp
+// dispatches to CheckSLHDSASignature for witness version 2.
+func p2qpkScriptPubKey(addr string) ([]byte, error) {
+	hash, err := address.ToHash(addr)
+	if err != nil {
+		return nil, fmt.Errorf("p2qpkScriptPubKey: %w", err)
+	}
+	script := make([]byte, 2+len(hash))
+	script[0] = 0x52 // OP_2 — witness version 2
+	script[1] = 0x20 // push 32 bytes
+	copy(script[2:], hash)
+	return script, nil
+}
+
 // SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
 // params.FromAddr must be in PENDING state. params.ChangeAddr must be a
 // FRESH wallet-controlled address; it is transitioned to PENDING after a
@@ -499,6 +546,28 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	if changeRec.State != keystore.StateFresh {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
 			ErrChangeAddressNotFresh, changeRec.State)
+	}
+
+	// M2.1: verify exactly one output's script pays to the change address.
+	// Without this check a caller could supply any ChangeAddr (FRESH, passing
+	// the state-machine check above) while the actual outputs route change
+	// elsewhere — the signed commitment and the state transition would be for
+	// different addresses.
+	changeScript, err := p2qpkScriptPubKey(params.ChangeAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", err)
+	}
+	changeMatches := 0
+	for _, out := range params.Outputs {
+		if bytes.Equal(out.Script, changeScript) {
+			changeMatches++
+		}
+	}
+	if changeMatches == 0 {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputMissing)
+	}
+	if changeMatches > 1 {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputAmbiguous)
 	}
 
 	sighash, err := computeP2QPKSighash(params)

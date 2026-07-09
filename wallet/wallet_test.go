@@ -274,11 +274,21 @@ func TestSignTransactionWithValidChange(t *testing.T) {
 		t.Fatal("change address must differ from the spending address")
 	}
 
+	changeHash, err := address.ToHash(change)
+	if err != nil {
+		t.Fatalf("address.ToHash failed: %v", err)
+	}
+	changeScript := append([]byte{0x52, 0x20}, changeHash...) // P2QPK scriptPubKey
+
 	tx := QOGETransaction{
-		From:      from,
-		To:        "qoge1recipientplaceholder",
-		Amount:    1000,
-		Change:    change,
+		From:   from,
+		To:     "qoge1recipientplaceholder",
+		Amount: 1000,
+		Change: change,
+		Outputs: []SpendOutput{
+			{Amount: 900, Script: []byte{0x51}},               // recipient output (OP_1 placeholder)
+			{Amount: 100, Script: changeScript},                // change output
+		},
 		MessageID: []byte("tx-001-payload"),
 	}
 
@@ -621,10 +631,17 @@ func TestListPurgeEligibleAddressesFiltersCorrectly(t *testing.T) {
 
 // ─── SignP2QPKInput change-output enforcement ─────────────────────────────────
 
-// makeMinimalSpendParams constructs the minimal valid P2QPKSpendParams for
-// signing tests. The sighash parameters are not the focus here — just
-// enough that computeP2QPKSighash doesn't error.
-func makeMinimalSpendParams(fromAddr, changeAddr string) P2QPKSpendParams {
+// makeMinimalSpendParams constructs a valid P2QPKSpendParams for signing tests,
+// including a change output whose Script matches the P2QPK scriptPubKey for
+// changeAddr (OP_2 PUSH32 <HASH256(changeAddr)>). The sighash fields are
+// minimal but structurally correct.
+func makeMinimalSpendParams(t *testing.T, fromAddr, changeAddr string) P2QPKSpendParams {
+	t.Helper()
+	hash, err := address.ToHash(changeAddr)
+	if err != nil {
+		t.Fatalf("makeMinimalSpendParams: ToHash(%s): %v", changeAddr, err)
+	}
+	changeScript := append([]byte{0x52, 0x20}, hash...) // OP_2 PUSH32 <hash>
 	return P2QPKSpendParams{
 		NVersion:  1,
 		NLockTime: 0,
@@ -635,7 +652,29 @@ func makeMinimalSpendParams(fromAddr, changeAddr string) P2QPKSpendParams {
 			{Amount: 100_000, Script: []byte{0x51}},
 		},
 		Outputs: []SpendOutput{
-			{Amount: 99_000, Script: []byte{0x51}},
+			{Amount: 99_000, Script: changeScript},
+		},
+		InputIndex: 0,
+		FromAddr:   fromAddr,
+		ChangeAddr: changeAddr,
+	}
+}
+
+// makeMinimalSpendParamsNoChangeOutput is the negative-test variant: it uses
+// an OP_1 output script (not a P2QPK script) so SignP2QPKInput must reject it
+// even when ChangeAddr is validly FRESH.
+func makeMinimalSpendParamsNoChangeOutput(fromAddr, changeAddr string) P2QPKSpendParams {
+	return P2QPKSpendParams{
+		NVersion:  1,
+		NLockTime: 0,
+		Inputs: []SpendInput{
+			{Vout: 0, NSequence: 0xffffffff},
+		},
+		SpentUTXOs: []SpentUTXO{
+			{Amount: 100_000, Script: []byte{0x51}},
+		},
+		Outputs: []SpendOutput{
+			{Amount: 99_000, Script: []byte{0x51}}, // OP_1, not P2QPK for changeAddr
 		},
 		InputIndex: 0,
 		FromAddr:   fromAddr,
@@ -657,7 +696,7 @@ func TestSignP2QPKInputRejectsNonFreshChange(t *testing.T) {
 	}
 
 	// Use fromAddr itself as change — it is PENDING, not FRESH.
-	params := makeMinimalSpendParams(fromAddr, fromAddr)
+	params := makeMinimalSpendParams(t, fromAddr, fromAddr)
 	_, _, err = w.SignP2QPKInput(params)
 	if err == nil {
 		t.Fatal("SignP2QPKInput should reject a change address that is not FRESH")
@@ -695,7 +734,7 @@ func TestSignP2QPKInputTransitionsChangeAfterSigning(t *testing.T) {
 		t.Fatalf("change address state before signing = %s, want FRESH", changeRec.State)
 	}
 
-	params := makeMinimalSpendParams(fromAddr, changeAddr)
+	params := makeMinimalSpendParams(t, fromAddr, changeAddr)
 	pubKey, sig, err := w.SignP2QPKInput(params)
 	if err != nil {
 		t.Fatalf("SignP2QPKInput failed: %v", err)
@@ -723,6 +762,42 @@ func TestSignP2QPKInputTransitionsChangeAfterSigning(t *testing.T) {
 	}
 	if fromRec.State != keystore.StatePending {
 		t.Errorf("from address state after signing = %s, want PENDING", fromRec.State)
+	}
+}
+
+// TestSignP2QPKInputRejectsNoMatchingOutput proves the output-binding check:
+// signing must fail when ChangeAddr is validly FRESH but no output script
+// in the transaction encodes that address as a P2QPK scriptPubKey.
+func TestSignP2QPKInputRejectsNoMatchingOutput(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	changeAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (change) failed: %v", err)
+	}
+
+	// Params have a valid FRESH changeAddr but the single output uses OP_1
+	// (0x51), not the P2QPK script for changeAddr.
+	params := makeMinimalSpendParamsNoChangeOutput(fromAddr, changeAddr)
+	_, _, err = w.SignP2QPKInput(params)
+	if err == nil {
+		t.Fatal("SignP2QPKInput should reject when no output pays to the change address")
+	}
+
+	// Change address must remain FRESH — signing must not have transitioned it.
+	rec, err := w.index.GetRecord(changeAddr)
+	if err != nil {
+		t.Fatalf("GetRecord failed: %v", err)
+	}
+	if rec.State != keystore.StateFresh {
+		t.Errorf("change address state after rejected sign = %s, want FRESH", rec.State)
 	}
 }
 
@@ -792,11 +867,19 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress (change) failed: %v", err)
 	}
+	changeHash, err := address.ToHash(changeAddr)
+	if err != nil {
+		t.Fatalf("address.ToHash failed: %v", err)
+	}
 	tx := QOGETransaction{
-		From:      receiveAddr,
-		To:        "qoge1recipientplaceholder",
-		Amount:    5000,
-		Change:    changeAddr,
+		From:   receiveAddr,
+		To:     "qoge1recipientplaceholder",
+		Amount: 5000,
+		Change: changeAddr,
+		Outputs: []SpendOutput{
+			{Amount: 4900, Script: []byte{0x51}},
+			{Amount: 100, Script: append([]byte{0x52, 0x20}, changeHash...)},
+		},
 		MessageID: []byte("full-lifecycle-tx"),
 	}
 	signed, err := w.SignTransaction(tx)
