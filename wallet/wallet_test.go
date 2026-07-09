@@ -204,8 +204,8 @@ func TestSignAndVerifyMessage(t *testing.T) {
 	if len(pubKey) != 32 {
 		t.Errorf("public key length = %d, want 32", len(pubKey))
 	}
-	if len(sig) > slhdsa.SignatureSize {
-		t.Errorf("signature length %d exceeds max %d", len(sig), slhdsa.SignatureSize)
+	if len(sig) != slhdsa.SignatureSize {
+		t.Errorf("signature length %d, want exact %d", len(sig), slhdsa.SignatureSize)
 	}
 
 	// The returned public key must correspond to the signing address.
