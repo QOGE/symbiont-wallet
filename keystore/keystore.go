@@ -266,35 +266,6 @@ func (ki *KeyIndex) Retire(addr string) error {
 	return ki.transition(addr, StateSpent, StateRetired, true)
 }
 
-// MarkSpentAndRetire performs PENDING → SPENT → RETIRED in a single bbolt
-// transaction. Either both transitions complete or neither does — a crash
-// between the two state changes cannot leave the address in SPENT state
-// with the seed still present. Use this instead of calling MarkSpent then
-// Retire separately.
-func (ki *KeyIndex) MarkSpentAndRetire(addr string) error {
-	ki.mu.Lock()
-	defer ki.mu.Unlock()
-
-	return ki.db.Update(func(tx *bolt.Tx) error {
-		rec, key, err := findRecord(tx, addr)
-		if err != nil {
-			return err
-		}
-		if rec.State != StatePending {
-			return ErrAddressNotPending
-		}
-		// PENDING → SPENT → RETIRED in one write.
-		rec.State = StateRetired
-		ZeroBytes(rec.EncSeedBlob)
-		rec.EncSeedBlob = nil
-		data, err := json.Marshal(rec)
-		if err != nil {
-			return err
-		}
-		return tx.Bucket(bucketAddresses).Put(key, data)
-	})
-}
-
 // transition is the internal state machine executor.
 // zeroSeed: if true, the EncSeedBlob field is zeroed and removed from the record.
 func (ki *KeyIndex) transition(addr string, from, to AddressState, zeroSeed bool) error {

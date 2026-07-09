@@ -76,7 +76,7 @@ FRESH → PENDING → SPENT → RETIRED (EncSeedBlob zeroed, permanent)
 - `wallet.OnConfirmation(addr, confirmations)` — flags the address SPENT at confirmations ≥ 1 (prevents reuse). Does NOT destroy the private key. Also refills the pre-generation pool.
 - `wallet.PurgeSpentKey(addr, confirmations)` — optional, manual, irreversible key destruction. Requires SPENT state and confirmations ≥ `keyDestructionMinConfirmations` (default 101). Never called automatically.
 - `wallet.ListPurgeEligibleAddresses(confirmationsFor)` — advisory scan returning SPENT addresses above the threshold. Does not purge anything.
-- `keystore.MarkSpentAndRetire` remains available as a single-transaction PENDING→RETIRED primitive, but is no longer called by `OnConfirmation`.
+- `keystore.MarkSpentAndRetire` has been removed — it was the Audit 5 atomicity fix for `OnConfirmation`, but `OnConfirmation` no longer performs key destruction (Audit 4 redesign), leaving the method with zero production callers and a footgun API (no confirmation-depth guard). The two-step `MarkSpent` + `Retire` path through `OnConfirmation` + `PurgeSpentKey` is the correct replacement.
 
 **Change-output enforcement:** `SignP2QPKInput` and `SignTransaction` both validate that the designated change address is FRESH and wallet-controlled before signing, then transition it to PENDING immediately after a successful sign. If signing fails for any reason, the change address is not transitioned.
 
