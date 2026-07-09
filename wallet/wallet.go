@@ -51,6 +51,11 @@ var ErrChangeOutputMissing = errors.New("wallet: no output script pays to the ch
 // change address. Change must route to exactly one output.
 var ErrChangeOutputAmbiguous = errors.New("wallet: multiple outputs pay to the change address — change must route to exactly one output")
 
+// ErrFromAddrScriptMismatch is returned when SpentUTXOs[InputIndex].Script
+// does not match the P2QPK scriptPubKey derived from FromAddr. The UTXO being
+// consumed must have been sent to the signing address.
+var ErrFromAddrScriptMismatch = errors.New("wallet: SpentUTXOs[InputIndex].Script does not match the P2QPK scriptPubKey for FromAddr")
+
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
 // M2.2: pre-generate 20 addresses on init and after each spend.
 const PreGenPoolSize = 20
@@ -538,6 +543,23 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	if rec.State != keystore.StatePending {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want PENDING)",
 			params.FromAddr, rec.State)
+	}
+
+	// Verify that SpentUTXOs[InputIndex].Script matches the P2QPK scriptPubKey
+	// for FromAddr. Without this check a caller could pass a UTXO script
+	// belonging to a different address; the wallet would sign with FromAddr's
+	// key, producing an invalid on-chain transaction while consuming the
+	// address's state.
+	if int(params.InputIndex) >= len(params.SpentUTXOs) {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: InputIndex %d out of range (SpentUTXOs len %d)",
+			params.InputIndex, len(params.SpentUTXOs))
+	}
+	fromScript, err := p2qpkScriptPubKey(params.FromAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", err)
+	}
+	if !bytes.Equal(params.SpentUTXOs[params.InputIndex].Script, fromScript) {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrFromAddrScriptMismatch)
 	}
 
 	// M2.1: validate change routes to a FRESH wallet-controlled address before signing.

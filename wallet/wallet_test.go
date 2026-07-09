@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -631,17 +632,22 @@ func TestListPurgeEligibleAddressesFiltersCorrectly(t *testing.T) {
 
 // ─── SignP2QPKInput change-output enforcement ─────────────────────────────────
 
-// makeMinimalSpendParams constructs a valid P2QPKSpendParams for signing tests,
-// including a change output whose Script matches the P2QPK scriptPubKey for
-// changeAddr (OP_2 PUSH32 <HASH256(changeAddr)>). The sighash fields are
+// makeMinimalSpendParams constructs a valid P2QPKSpendParams for signing tests.
+// SpentUTXOs[0].Script is the P2QPK scriptPubKey for fromAddr; the change
+// output script is the P2QPK scriptPubKey for changeAddr. Sighash fields are
 // minimal but structurally correct.
 func makeMinimalSpendParams(t *testing.T, fromAddr, changeAddr string) P2QPKSpendParams {
 	t.Helper()
-	hash, err := address.ToHash(changeAddr)
+	fromHash, err := address.ToHash(fromAddr)
+	if err != nil {
+		t.Fatalf("makeMinimalSpendParams: ToHash(%s): %v", fromAddr, err)
+	}
+	fromScript := append([]byte{0x52, 0x20}, fromHash...) // OP_2 PUSH32 <hash>
+	changeHash, err := address.ToHash(changeAddr)
 	if err != nil {
 		t.Fatalf("makeMinimalSpendParams: ToHash(%s): %v", changeAddr, err)
 	}
-	changeScript := append([]byte{0x52, 0x20}, hash...) // OP_2 PUSH32 <hash>
+	changeScript := append([]byte{0x52, 0x20}, changeHash...) // OP_2 PUSH32 <hash>
 	return P2QPKSpendParams{
 		NVersion:  1,
 		NLockTime: 0,
@@ -649,7 +655,7 @@ func makeMinimalSpendParams(t *testing.T, fromAddr, changeAddr string) P2QPKSpen
 			{Vout: 0, NSequence: 0xffffffff},
 		},
 		SpentUTXOs: []SpentUTXO{
-			{Amount: 100_000, Script: []byte{0x51}},
+			{Amount: 100_000, Script: fromScript},
 		},
 		Outputs: []SpendOutput{
 			{Amount: 99_000, Script: changeScript},
@@ -660,10 +666,17 @@ func makeMinimalSpendParams(t *testing.T, fromAddr, changeAddr string) P2QPKSpen
 	}
 }
 
-// makeMinimalSpendParamsNoChangeOutput is the negative-test variant: it uses
-// an OP_1 output script (not a P2QPK script) so SignP2QPKInput must reject it
-// even when ChangeAddr is validly FRESH.
-func makeMinimalSpendParamsNoChangeOutput(fromAddr, changeAddr string) P2QPKSpendParams {
+// makeMinimalSpendParamsNoChangeOutput is the negative-test variant: the
+// SpentUTXO script is the correct P2QPK script for fromAddr, but the single
+// output uses OP_1 (not a P2QPK script for changeAddr), so SignP2QPKInput
+// must reject with ErrChangeOutputMissing.
+func makeMinimalSpendParamsNoChangeOutput(t *testing.T, fromAddr, changeAddr string) P2QPKSpendParams {
+	t.Helper()
+	fromHash, err := address.ToHash(fromAddr)
+	if err != nil {
+		t.Fatalf("makeMinimalSpendParamsNoChangeOutput: ToHash(%s): %v", fromAddr, err)
+	}
+	fromScript := append([]byte{0x52, 0x20}, fromHash...) // OP_2 PUSH32 <hash>
 	return P2QPKSpendParams{
 		NVersion:  1,
 		NLockTime: 0,
@@ -671,7 +684,7 @@ func makeMinimalSpendParamsNoChangeOutput(fromAddr, changeAddr string) P2QPKSpen
 			{Vout: 0, NSequence: 0xffffffff},
 		},
 		SpentUTXOs: []SpentUTXO{
-			{Amount: 100_000, Script: []byte{0x51}},
+			{Amount: 100_000, Script: fromScript},
 		},
 		Outputs: []SpendOutput{
 			{Amount: 99_000, Script: []byte{0x51}}, // OP_1, not P2QPK for changeAddr
@@ -785,7 +798,7 @@ func TestSignP2QPKInputRejectsNoMatchingOutput(t *testing.T) {
 
 	// Params have a valid FRESH changeAddr but the single output uses OP_1
 	// (0x51), not the P2QPK script for changeAddr.
-	params := makeMinimalSpendParamsNoChangeOutput(fromAddr, changeAddr)
+	params := makeMinimalSpendParamsNoChangeOutput(t, fromAddr, changeAddr)
 	_, _, err = w.SignP2QPKInput(params)
 	if err == nil {
 		t.Fatal("SignP2QPKInput should reject when no output pays to the change address")
@@ -798,6 +811,47 @@ func TestSignP2QPKInputRejectsNoMatchingOutput(t *testing.T) {
 	}
 	if rec.State != keystore.StateFresh {
 		t.Errorf("change address state after rejected sign = %s, want FRESH", rec.State)
+	}
+}
+
+// TestSignP2QPKInputRejectsMismatchedFromScript confirms that SignP2QPKInput
+// rejects params where SpentUTXOs[InputIndex].Script does not match the
+// P2QPK scriptPubKey derived from FromAddr.
+func TestSignP2QPKInputRejectsMismatchedFromScript(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress failed: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	changeAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (change) failed: %v", err)
+	}
+
+	// Build valid params via makeMinimalSpendParams, then overwrite the UTXO
+	// script with OP_1 — simulating a caller that passes a mismatched UTXO.
+	params := makeMinimalSpendParams(t, fromAddr, changeAddr)
+	params.SpentUTXOs[0].Script = []byte{0x51} // wrong: not the P2QPK script for fromAddr
+
+	_, _, err = w.SignP2QPKInput(params)
+	if err == nil {
+		t.Fatal("SignP2QPKInput should reject when SpentUTXOs[InputIndex].Script does not match FromAddr")
+	}
+	if !errors.Is(err, ErrFromAddrScriptMismatch) {
+		t.Errorf("expected ErrFromAddrScriptMismatch, got: %v", err)
+	}
+
+	// fromAddr must still be PENDING — signing must not have advanced its state.
+	rec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatalf("GetRecord failed: %v", err)
+	}
+	if rec.State != keystore.StatePending {
+		t.Errorf("fromAddr state after rejected sign = %s, want PENDING", rec.State)
 	}
 }
 
