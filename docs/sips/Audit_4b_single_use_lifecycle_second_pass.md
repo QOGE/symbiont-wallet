@@ -17,6 +17,12 @@ Audit 4.
 **Reviewed at:** `b5e757d` (post-Audit-4 redesign). One cleanup applied in this
 session: `wallet_test.go` sig-length check (`>` → `!=`) — see Q9 below.
 
+**Post-audit fixes (three-pass convergence, same session):** Three of four
+informational items subsequently resolved — see "Post-audit dispositions" section
+at the end. One additional finding surfaced by three-pass convergence that was not
+caught in this pass (change-output binding in `SignP2QPKInput`) — also documented
+there.
+
 ---
 
 ## Headline result
@@ -41,9 +47,9 @@ accurate; two HIGH/CRITICAL findings confirmed fixed.
 | Q4 | PASS | `SignTransaction` stub applies same ordering: FRESH check → sign → `MarkPending`; failure leaves change FRESH |
 | Q5 | PASS | `ListByState` uses `db.View`; no mutations; iteration deterministic (bbolt big-endian uint64 keys) |
 | Q6 | PASS | Only `StateSpent` records enter eligibility loop; advisory only; no transitions triggered |
-| Q7 | PASS + INFORMATIONAL | No backward transitions; `MarkSpentAndRetire` shortcut noted (see below) |
+| Q7 | PASS + INFORMATIONAL → RESOLVED | No backward transitions; `MarkSpentAndRetire` shortcut removed entirely (`8f4e192`) |
 | Q8 | PASS | Tests verify the right properties at the right stack level (detailed below) |
-| Q9 | INFORMATIONAL (×2) | Sig-length check inconsistency (FIXED); `SetKeyDestructionMinConfirmations` package-level state |
+| Q9 | INFORMATIONAL (×2) | Sig-length check inconsistency (FIXED); `SetKeyDestructionMinConfirmations` floor now enforced in code (`8d9b809`) |
 
 ---
 
@@ -67,21 +73,22 @@ reserve-and-sign primitive, which is a larger architectural change. The current
 behaviour is safe for all single-wallet-instance deployments and most concurrent
 scenarios. **Not a mainnet blocker.**
 
-### Q7 — INFORMATIONAL: `MarkSpentAndRetire` provides PENDING→RETIRED shortcut at keystore layer
+### Q7 — INFORMATIONAL → RESOLVED: `MarkSpentAndRetire` PENDING→RETIRED shortcut
 
-`MarkSpentAndRetire` (keystore.go) transitions PENDING→RETIRED in one bolt
-transaction, bypassing SPENT as a persisted intermediate state. It correctly
-enforces `rec.State != StatePending` before acting and zeroes the seed blob.
+`MarkSpentAndRetire` (keystore.go) transitioned PENDING→RETIRED in one bolt
+transaction, bypassing SPENT as a persisted intermediate state. No `wallet.go`
+code path called it — the Audit 4 redesign left it with zero production callers.
 
-**Disposition — intentional and not reachable from wallet.go:** No `wallet.go`
-code path calls `MarkSpentAndRetire`. The wallet API always routes through
-`OnConfirmation` → `MarkSpent` (PENDING→SPENT) then `PurgeSpentKey` → `Retire`
-(SPENT→RETIRED). The shortcut is available for code using the keystore directly
-(e.g., the Audit 5 atomicity fix) and is intentional.
+**Disposition at audit time:** intentional, not reachable from wallet API,
+not a mainnet blocker.
 
-**Recommendation for future keystore API documentation:** explicitly note that
-`MarkSpentAndRetire` bypasses the SPENT state and is intended for trusted
-internal callers, not general integrators. **Not a mainnet blocker.**
+**Subsequently resolved (`8f4e192`):** `MarkSpentAndRetire` removed entirely from
+`keystore.go`. Rationale: zero production callers after the Audit 4 redesign; no
+confirmation-depth guard (a caller could invoke it at confirmation depth 0); the
+method was the Audit 5 atomicity fix for the old `OnConfirmation`, which no longer
+destroys keys. The two-step `MarkSpent` + `Retire` path through `OnConfirmation`
++ `PurgeSpentKey` is the correct replacement. `TestMarkSpentAndRetireIsAtomic` and
+`TestMarkSpentAndRetireRequiresPending` removed from `keystore_test.go`.
 
 ### Q9 — INFORMATIONAL (FIXED): `TestSignAndVerifyMessage` sig-length check inconsistency
 
@@ -95,16 +102,21 @@ to the same type of assertion elsewhere.
 **Fix applied:** `wallet_test.go` line 207 changed to `!= slhdsa.SignatureSize`.
 This session's commit.
 
-### Q9 — INFORMATIONAL: `keyDestructionMinConfirmations` is package-level state
+### Q9 — INFORMATIONAL → PARTIALLY RESOLVED: `keyDestructionMinConfirmations` is package-level state
 
-`keyDestructionMinConfirmations` is a package-level `var` (wallet.go:71). In a
+`keyDestructionMinConfirmations` is a package-level `var` (wallet.go). In a
 process running multiple `Wallet` instances (e.g., mainnet and testnet in the
 same binary), `SetKeyDestructionMinConfirmations` affects all instances.
 
-**Disposition — not an issue in current deployment:** The CLI creates one wallet
-instance; nothing in the current codebase creates two. Recorded for future
-integrators who embed the wallet library with multiple instances. **Not a
-mainnet blocker.**
+**Disposition at audit time:** not an issue in current deployment (CLI creates
+one wallet instance); recorded for future integrators. Not a mainnet blocker.
+
+**Subsequently partially resolved (`8d9b809`):** `SetKeyDestructionMinConfirmations`
+now returns `error` and enforces a hard 101-block floor — calls with values below
+`KeyDestructionMinConfirmations` (101) are rejected in code, not just as a comment.
+The package-level variable itself remains unchanged (a per-instance field would
+require an API break); the API is now safe against misconfiguration below the
+coinbase maturity depth.
 
 ---
 
@@ -133,15 +145,43 @@ independently of whether a sign has occurred.
 
 | Finding | Disposition |
 |---|---|
-| Q3 TOCTOU (check/MarkPending gap) | INFORMATIONAL — resolves safely; retry semantics correct |
-| Q7 `MarkSpentAndRetire` keystore shortcut | INFORMATIONAL — intentional, not reachable from wallet API |
+| Q3 TOCTOU (check/MarkPending gap) | INFORMATIONAL — resolves safely; retry semantics correct; deferred |
+| Q7 `MarkSpentAndRetire` keystore shortcut | RESOLVED — removed entirely (`8f4e192`); zero callers, footgun API |
 | Q9 sig-length check inconsistency | FIXED — `wallet_test.go` updated to exact equality |
-| Q9 package-level confirmation var | INFORMATIONAL — document for multi-instance integrators |
+| Q9 package-level confirmation var | PARTIALLY RESOLVED — hard 101-block floor enforced in code (`8d9b809`) |
 
 **Audit 4b overall: PASS. The Audit 4 redesign is structurally sound. No
 finding is a mainnet blocker. The two HIGH/CRITICAL findings from Audit 4 are
 confirmed fixed. The second-pass recommendation in Audit 4 and CLAUDE.md is
 satisfied.**
+
+---
+
+## Post-audit dispositions (three-pass convergence fixes, 9 July 2026)
+
+After this audit, three independent passes (Grok Build, Codex CLI, Claude Sonnet
+4.6) converged on the following in the same session:
+
+**Change-output binding in `SignP2QPKInput` — NOT caught by this pass (commit `e1df1b5`):**
+`SignP2QPKInput` validated that `ChangeAddr` was FRESH and wallet-controlled but
+did not verify that any `params.Outputs[i].Script` actually routes change to that
+address. A mismatched output list would cause the wallet to transition the change
+address to PENDING while the transaction sends change elsewhere. Fix: before
+signing, exactly one entry in `params.Outputs` must have a script equal to the
+P2QPK scriptPubKey of `ChangeAddr` (`OP_2 | PUSH32 | HASH256(changeAddr)`);
+`ErrChangeOutputMissing` / `ErrChangeOutputAmbiguous` returned otherwise. Same
+check added to `SignTransaction`. `QOGETransaction` gained `Outputs []SpendOutput`.
+Helper `p2qpkScriptPubKey` added to wallet.go. Test
+`TestSignP2QPKInputRejectsNoMatchingOutput` added.
+
+**`MarkSpentAndRetire` removal — resolves Q7 (commit `8f4e192`):** see above.
+
+**`SetKeyDestructionMinConfirmations` hard floor — resolves Q9 partial (commit `8d9b809`):** see above.
+
+**CLI purge message honesty (commit `042bed5`):** purge success message corrected
+from "zeroed from memory and storage" to accurately describe bbolt copy-on-write
+semantics — old pages may persist until compaction, but the seed is encrypted at
+rest so residual pages do not expose the raw key.
 
 ---
 
