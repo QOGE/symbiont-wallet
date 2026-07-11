@@ -184,6 +184,16 @@ func ImportSigner(secretKey, pubKey []byte) (*Signer, error) {
 // Sign signs msg and returns the raw SLH-DSA signature (~17 KB).
 // msg should be a pre-hashed message digest, not raw cleartext.
 // Use crypto/message.Hash() to produce a canonical QOGE message hash.
+//
+// CONCURRENCY: Sign acquires rngMu for the duration of the underlying
+// OQS_SIG_sign call. This is required because signing draws 16 random bytes
+// (addrnd) from the process-global OQS_randombytes slot — the same slot that
+// NewSignerFromSeed temporarily redirects with a deterministic callback.
+// Without this guard, a concurrent Sign call during deterministic keygen would
+// consume the callback's seed bytes, silently corrupting both the signature's
+// randomization and the keygen output. Any caller that wraps Sign or calls it
+// directly from a raw *Signer (outside the wallet) must not hold rngMu
+// themselves; rngMu is non-reentrant.
 func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	rngMu.Lock()
 	sig, err := s.sig.Sign(msg)
