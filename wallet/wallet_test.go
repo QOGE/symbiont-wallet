@@ -1066,3 +1066,45 @@ func TestP2QPKSighashCrossValidationVector(t *testing.T) {
 			gotHex, want)
 	}
 }
+
+// ─── M1.3 deterministic keygen ───────────────────────────────────────────────
+
+// TestDeriveAddressDeterministic confirms that the same master seed always
+// produces the same first address across two independent wallet instances.
+// This is the end-to-end check of M1.3: master seed → HKDF 48-byte child seed
+// → NewSignerFromSeed → same public key → same QOGE address.
+func TestDeriveAddressDeterministic(t *testing.T) {
+	masterSeed := make([]byte, 32)
+	for i := range masterSeed {
+		masterSeed[i] = byte(i + 1)
+	}
+
+	// First wallet instance.
+	dbPath1 := filepath.Join(t.TempDir(), "wallet1.db")
+	w1, err := New(dbPath1, append([]byte(nil), masterSeed...))
+	if err != nil {
+		t.Fatalf("New (w1): %v", err)
+	}
+	addr1, err := w1.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (w1): %v", err)
+	}
+	w1.Close()
+
+	// Second wallet instance with the same seed.
+	dbPath2 := filepath.Join(t.TempDir(), "wallet2.db")
+	w2, err := New(dbPath2, append([]byte(nil), masterSeed...))
+	if err != nil {
+		t.Fatalf("New (w2): %v", err)
+	}
+	addr2, err := w2.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (w2): %v", err)
+	}
+	w2.Close()
+
+	if addr1 != addr2 {
+		t.Errorf("deriveAddress not deterministic:\n  wallet1: %s\n  wallet2: %s", addr1, addr2)
+	}
+	t.Logf("deterministic address for seed [1..32] at index 0: %s", addr1)
+}

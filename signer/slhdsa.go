@@ -17,9 +17,25 @@ package slhdsa
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/open-quantum-safe/liboqs-go/oqs"
 )
+
+// SeedSize is the number of bytes required for deterministic SLH-DSA-SHA2-128f
+// keygen per FIPS 205 §10.1 / Algorithm 21: 3 * n = 3 * 16 = 48 bytes.
+// Byte layout: SK.seed(16) || SK.prf(16) || PK.seed(16).
+// This constant is specific to SLH-DSA-SHA2-128f (n=16) and must be re-verified
+// against liboqs source if the algorithm or parameter set ever changes.
+// Confirmed against liboqs 0.15.0 slh_dsa.c:505 — single rbg(sk, 3*n) call.
+const SeedSize = 48
+
+// rngMu guards the process-global liboqs OQS_randombytes slot.
+// Hold during: the full install-generate-restore sequence in NewSignerFromSeed;
+// GenerateKeyPair in NewSigner; Sign in (Signer).Sign — all three draw from
+// the global RNG. Without this, a concurrent Sign during deterministic keygen
+// would consume custom-callback bytes, silently corrupting both operations.
+var rngMu sync.Mutex
 
 // AlgorithmName is the liboqs algorithm identifier for SLH-DSA-SHA2-128f.
 //
@@ -56,11 +72,90 @@ func NewSigner() (*Signer, []byte, error) {
 	if err := s.sig.Init(AlgorithmName, nil); err != nil {
 		return nil, nil, fmt.Errorf("slhdsa: Init failed: %w", err)
 	}
+	rngMu.Lock()
 	pub, err := s.sig.GenerateKeyPair()
+	rngMu.Unlock()
 	if err != nil {
 		s.sig.Clean()
 		return nil, nil, fmt.Errorf("slhdsa: GenerateKeyPair failed: %w", err)
 	}
+	s.pubKey = pub
+	return s, pub, nil
+}
+
+// NewSignerFromSeed deterministically generates an SLH-DSA-SHA2-128f keypair
+// from a 48-byte seed, using liboqs's process-global RNG override hook.
+//
+// seed must be exactly SeedSize (48) bytes:
+//
+//	SK.seed(16) || SK.prf(16) || PK.seed(16)
+//
+// per FIPS 205 Algorithm 21 for the 128f parameter set (n=16). Confirmed
+// against liboqs 0.15.0: keygen makes exactly one OQS_randombytes draw of
+// exactly 48 bytes (slh_dsa.c:505). The callback is defensive: a second
+// invocation or a draw of != 48 bytes is treated as an error (signals a
+// liboqs version change that would silently alter key derivation).
+//
+// The global RNG is restored to "system" via defer after keygen, before
+// rngMu is released — so no subsequent Sign or NewSigner call sees the
+// custom callback. rngMu is held for the full sequence; Sign and NewSigner
+// hold the same mutex, preventing concurrent RNG consumption.
+//
+// The caller is responsible for zeroing seed after this call returns.
+func NewSignerFromSeed(seed []byte) (*Signer, []byte, error) {
+	if len(seed) != SeedSize {
+		return nil, nil, fmt.Errorf("slhdsa: NewSignerFromSeed: seed must be %d bytes, got %d", SeedSize, len(seed))
+	}
+
+	rngMu.Lock()
+	// Defers run LIFO: RNG restored (defer 2) before mutex released (defer 1).
+	defer rngMu.Unlock()
+
+	var cbErr error
+	called := false
+
+	if err := oqs.RandomBytesCustomAlgorithm(func(buf []byte, n int) {
+		if called {
+			cbErr = fmt.Errorf("slhdsa: NewSignerFromSeed: RNG callback invoked more than once — liboqs draw pattern may have changed; verify liboqs version")
+			for i := range buf {
+				buf[i] = 0
+			}
+			return
+		}
+		called = true
+		if n != SeedSize || len(buf) != SeedSize {
+			cbErr = fmt.Errorf("slhdsa: NewSignerFromSeed: unexpected RNG draw n=%d len(buf)=%d (want both=%d) — verify liboqs source", n, len(buf), SeedSize)
+			for i := range buf {
+				buf[i] = 0
+			}
+			return
+		}
+		copy(buf, seed)
+	}); err != nil {
+		return nil, nil, fmt.Errorf("slhdsa: NewSignerFromSeed: install RNG callback: %w", err)
+	}
+	defer func() { _ = oqs.RandomBytesSwitchAlgorithm("system") }()
+
+	s := &Signer{}
+	if err := s.sig.Init(AlgorithmName, nil); err != nil {
+		return nil, nil, fmt.Errorf("slhdsa: NewSignerFromSeed: Init failed: %w", err)
+	}
+
+	pub, err := s.sig.GenerateKeyPair()
+	if err != nil {
+		s.sig.Clean()
+		return nil, nil, fmt.Errorf("slhdsa: NewSignerFromSeed: GenerateKeyPair failed: %w", err)
+	}
+
+	if cbErr != nil {
+		s.sig.Clean()
+		return nil, nil, cbErr
+	}
+	if !called {
+		s.sig.Clean()
+		return nil, nil, fmt.Errorf("slhdsa: NewSignerFromSeed: RNG callback was never invoked — keygen did not draw entropy (unexpected liboqs behavior)")
+	}
+
 	s.pubKey = pub
 	return s, pub, nil
 }
@@ -90,7 +185,9 @@ func ImportSigner(secretKey, pubKey []byte) (*Signer, error) {
 // msg should be a pre-hashed message digest, not raw cleartext.
 // Use crypto/message.Hash() to produce a canonical QOGE message hash.
 func (s *Signer) Sign(msg []byte) ([]byte, error) {
+	rngMu.Lock()
 	sig, err := s.sig.Sign(msg)
+	rngMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("slhdsa: Sign failed: %w", err)
 	}

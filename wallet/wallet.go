@@ -405,20 +405,20 @@ func (w *Wallet) fillPool() error {
 // We use HKDF-SHA256 with index as context rather than BIP32's secp256k1
 // point arithmetic, since SLH-DSA keys are not algebraically related.
 func (w *Wallet) deriveAddress(masterSeed []byte, index uint64) (pubKey, encSeedBlob []byte, addr string, err error) {
-	// Derive child seed: HKDF(masterSeed, salt=nil, info="qoge-key-{index}")
+	// Derive 48-byte child seed: HKDF-SHA256(masterSeed, salt=nil, info="qoge-key-{index}").
+	// 48 bytes = 3 * n for SLH-DSA-SHA2-128f (n=16), matching the single OQS_randombytes
+	// draw made by slh_keygen (FIPS 205 Algorithm 21, liboqs 0.15.0 slh_dsa.c:505).
 	info := fmt.Sprintf("qoge-key-%d", index)
-	childSeed, err := hkdfDerive32(masterSeed, []byte(info))
+	childSeed, err := hkdfDeriveN(masterSeed, []byte(info), slhdsa.SeedSize)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("deriveAddress: hkdf at index %d: %w", index, err)
 	}
 	defer keystore.ZeroBytes(childSeed)
 
-	// Generate SLH-DSA keypair from child seed.
-	// NOTE: liboqs-go Init with a non-nil seed uses it as the secret key seed.
-	// Confirm this behaviour matches FIPS 205 Section 10.1 key generation.
-	s, pub, err := slhdsa.NewSigner() // TODO M1.3: pass childSeed once liboqs-go supports deterministic keygen
+	// Deterministically generate SLH-DSA keypair from childSeed (M1.3).
+	s, pub, err := slhdsa.NewSignerFromSeed(childSeed)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("deriveAddress: NewSigner at index %d: %w", index, err)
+		return nil, nil, "", fmt.Errorf("deriveAddress: NewSignerFromSeed at index %d: %w", index, err)
 	}
 	defer s.Clean()
 
@@ -467,10 +467,10 @@ func GenerateMasterSeed() ([]byte, error) {
 	return seed, nil
 }
 
-// hkdfDerive32 derives 32 bytes from seed with HKDF-SHA256.
-func hkdfDerive32(seed, info []byte) ([]byte, error) {
+// hkdfDeriveN derives n bytes from seed with HKDF-SHA256.
+func hkdfDeriveN(seed, info []byte, n int) ([]byte, error) {
 	h := hkdf.New(sha256.New, seed, nil, info)
-	out := make([]byte, 32)
+	out := make([]byte, n)
 	if _, err := io.ReadFull(h, out); err != nil {
 		return nil, err
 	}

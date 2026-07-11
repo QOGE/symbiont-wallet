@@ -71,7 +71,7 @@ secp256k1 point at rest, defeating any script-path PQC check).
 
 | ID    | Milestone                              | Status         | Tests |
 |-------|----------------------------------------|----------------|-------|
-| M1.1  | liboqs-go → FIPS 205 (SLH-DSA-SHA2-128f) | ✅ VALIDATED | `signer` — 7/7 |
+| M1.1  | liboqs-go → FIPS 205 (SLH-DSA-SHA2-128f) | ✅ VALIDATED | `signer` — 11/11 |
 | M1.2  | HASH256 → address derivation           | ✅ VALIDATED   | `address` — 17/17 (was 13/13; +4 network tests) |
 | M1.3  | HD index counter + encrypted persist   | ✅ VALIDATED   | `keystore` — 17/17 |
 | M1.4  | Address state machine + invariants     | ✅ VALIDATED   | `keystore` — 17/17 |
@@ -228,11 +228,15 @@ go run cmd/main.go
 
 Choose **1** to create a new wallet.
 
-> ⚠️ **Backup warning:** Save BOTH the seed hex AND a copy of your
-> `qoge_wallet.db` file. In the current version, the seed alone cannot
-> recover your wallet — key generation is not yet deterministic from
-> the seed (open item M1.3). Loss of the database file means permanent
-> loss of access to your keys, even with the seed.
+> ⚠️ **Backup — new wallets (post-M1.3):** Save the seed hex. Key generation
+> is now deterministic from the seed — the database file is a performance
+> cache and can be rebuilt from the seed. The seed alone is sufficient for
+> recovery of all addresses generated after this fix.
+>
+> ⚠️ **Backup — existing wallets (pre-M1.3, created before this commit):**
+> Save BOTH the seed hex AND a copy of your `qoge_wallet.db` file. Keys
+> generated before this fix used random keygen and cannot be re-derived from
+> the seed alone. Loss of the DB file means permanent loss of those keys.
 
 From the main menu: get a receive address (1), mark it as paid (2), sign a
 message (3), then confirm (4) to retire the address and zero its key.
@@ -278,20 +282,22 @@ self-contained BIP173+BIP350 codec is vendored in `bech32m.go`, reusing only
 `bech32.ConvertBits` (5-bit/8-bit regrouping, unaffected by BIP350) from the
 existing dependency.
 
-### M1.3 — Deterministic key derivation (open item)
+### M1.3 — Deterministic key derivation — RESOLVED
 
-`wallet/wallet.go:deriveAddress()` currently calls `slhdsa.NewSigner()`
-(random keygen) rather than deriving deterministically from `childSeed`.
+`wallet/wallet.go:deriveAddress()` now calls `slhdsa.NewSignerFromSeed(childSeed)`
+where `childSeed` is 48 bytes derived via `HKDF-SHA256(masterSeed, nil, "qoge-key-{index}")`.
 
-**Impact:** wallet recovery from the master seed alone is not yet possible
-— the encrypted index DB (`qoge_wallet.db`) is currently the sole source of
-truth for which keypairs exist. Losing the DB loses the wallet, even with
-the seed. This must be resolved before any real-value use.
+**Implementation:** `oqs.RandomBytesCustomAlgorithm` installs a one-shot process-global
+callback delivering the 48-byte child seed; `oqs.RandomBytesSwitchAlgorithm("system")`
+restores normal randomness in a deferred call. A package-level `rngMu sync.Mutex` is
+held for the full install-generate-restore sequence and is also held during `Sign` (which
+draws 16 bytes for `addrnd`) and random `NewSigner` calls — preventing concurrent RNG
+corruption. KAT vector pinned: seed `[0x01..0x30]` →
+`2122232425262728292a2b2c2d2e2f30a3356a1283ac92dcae6a36960ace2600`.
 
-**Path forward:** check whether liboqs's
-`OQS_SIG_slh_dsa_pure_sha2_128f_keypair` supports seeded generation at the C
-level (FIPS 205 §10.1 specifies SLH-DSA key generation as deterministic
-given `SK.seed`, `SK.prf`, `PK.seed`).
+**Forward-looking only:** addresses generated before this commit used random keygen.
+Those keys cannot be re-derived from the seed alone — the DB file remains the sole
+source of truth for pre-fix addresses. Post-fix addresses are fully seed-recoverable.
 
 ### M1.6 / SIP-QOGE-PQC-02 Phase B+ — Consensus integration
 
