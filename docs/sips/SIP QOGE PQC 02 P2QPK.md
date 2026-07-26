@@ -105,11 +105,33 @@ start/timeout heights: **governance decisions, not cryptographic ones** — do
 not pick these unilaterally; flag for SAOGEN governance when reached.
 
 **Bit 3 has been selected** and used consistently across regtest and testnet
-deployments (`ALWAYS_ACTIVE`). Mainnet `nStartTime`, `nTimeout`, and miner
-signaling window remain SAOGEN governance decisions. The full BIP9 activation
-cycle has been validated end-to-end under real mainnet parameters (Phase G) —
-the remaining open item is the governance decision on `nStartTime`, not further
-technical validation.
+deployments (`ALWAYS_ACTIVE`). **Mainnet activation parameters are now set**
+(commit `7912fa1c1`, QOGE/qogecoin, 2026-07-26 — independently reviewed by
+Codex and Grok Build, zero discrepancies on any parameter value):
+
+| Parameter | Value |
+|-----------|-------|
+| `bit` | 3 |
+| `nStartTime` | 1786284720 (2026-08-09 14:12 UTC) |
+| `nTimeout` | 1794060720 (2026-11-07 14:12 UTC) |
+| `nMinerConfirmationWindow` | 8064 (5.6 days/window at 1-min blocks) |
+| `nRuleChangeActivationThreshold` | 6048 (75% of 8064) |
+
+`nMinerConfirmationWindow` and `nRuleChangeActivationThreshold` are long-standing
+values traced via `git log -L` to the file's 2022 introduction; commit `7912fa1c1`
+touched only `nStartTime` and `nTimeout`. Note: the source comment's claimed
+derivation for 8064 (`nMinerConfirmationWindow = nPowTargetTimespan /
+nPowTargetSpacing`) does not compute to 8064 using QOGE's own constants (actual
+result: 70,560) — a pre-existing, harmless documentation inaccuracy, noted for
+completeness, unrelated to this commit and not fixed by it.
+
+**Expected activation timeline** (from when `nStartTime` passes on-chain):
+- `nStartTime` → STARTED: 0–~5.6 days (depends on retarget-boundary alignment)
+- STARTED → ACTIVE with continuous successful signaling (expected case with coordinated miners): exactly 11.2 days (two full 8064-block windows)
+- Worst case, `nStartTime` → ACTIVE: ~16.8 days
+- `nTimeout` (2026-11-07) provides ~74 days of margin beyond that worst case
+
+What remains: formal SIP ratification (SAOGEN governance).
 
 **Pre-activation property** (favorable): P2QPK outputs are anyone-can-spend
 until activation — testing can proceed on a public testnet *before*
@@ -166,7 +188,8 @@ introduce one without re-justifying against this table.
 | M1.3 fix — deterministic SLH-DSA keygen from seed | `98b1332` (symbiont-wallet) | Resolves Audit 3 Q3 (HIGH/CRITICAL, confirmed by six auditors). `wallet.deriveAddress()` previously called `slhdsa.NewSigner()` (random keygen), making the DB the sole source of truth and the seed alone insufficient for wallet recovery. Fix: HKDF-SHA256(masterSeed, nil, "qoge-key-{index}") produces 48 bytes (= 3×n for SLH-DSA-SHA2-128f, n=16); `slhdsa.NewSignerFromSeed()` installs a one-shot `oqs.RandomBytesCustomAlgorithm` callback delivering those bytes; `oqs.RandomBytesSwitchAlgorithm("system")` restores the RNG in a defer before `rngMu` is released. `rngMu sync.Mutex` (package-level in `signer/slhdsa.go`) also guards `NewSigner.GenerateKeyPair` and `Sign` (which draws 16 bytes for `addrnd`) — prevents concurrent RNG corruption. KAT vector pinned: seed `[0x01..0x30]` → pubkey `2122232425262728292a2b2c2d2e2f30a3356a1283ac92dcae6a36960ace2600`; first 16 bytes = PK.seed = input bytes 32–47 (FIPS 205 §5.1, confirmed correct). `TestNewSignerFromSeedKnownAnswer`, `TestNewSignerFromSeedConcurrent`, `TestNewSignerFromSeedVsSignRace` (race-detector clean), `TestDeriveAddressDeterministic` added. `hkdfDerive32` → `hkdfDeriveN(n int)`. Forward-looking only: pre-fix keys remain DB-only recoverable. 73/73 tests pass. |
 | M1.3 follow-up review — `Sign()` RNG-guard comment | `5342f1b` (symbiont-wallet) | Two independent reviews of `98b1332` (Grok Build, Codex) both converged on `rngMu` as the correct lock — confirming the structural gap was already closed. The one real finding: `Sign()`'s doc comment was silent about holding `rngMu` and the reason (its `OQS_SIG_sign` call draws 16 bytes for `addrnd` from the global RNG; without the guard, a concurrent `Sign` during deterministic keygen would consume the custom-callback's seed bytes, corrupting both). Comment added; also notes `rngMu` is non-reentrant (raw callers must not hold it). 73/73 tests pass, `-race` clean. |
 | **Real-parameter mainnet activation simulation — COMPLETE** | — | Full BIP9 activation cycle validated end-to-end on an isolated, air-gapped two-node local simulation using real intended mainnet parameters: `nMinerConfirmationWindow=2016`, `nRuleChangeActivationThreshold=1512` (75%), genuine future `nStartTime`. Phase transitions confirmed at exactly the predicted heights: `DEFINED→STARTED` at 2016, `STARTED→LOCKED_IN` at 4032, `LOCKED_IN→ACTIVE` at 6048. Post-`ACTIVE`: real P2QPK spend (constructed via `SignP2QPKInput`) broadcast and confirmed on both nodes via natural mining; deliberately tampered spend (three signature bytes flipped) correctly rejected by `SCRIPT_VERIFY_P2QPK` (`non-mandatory-script-verify-flag (Witness program hash mismatch)`). Closes the last major open unknown before a mainnet activation decision — BIP9 mechanism, real window/threshold values, and P2QPK enforcement validated together under realistic conditions. What remains is a governance decision on `nStartTime` and formal SIP ratification. |
-| Full suite race-detector pass | `2b1f3ff` (symbiont-wallet, HEAD) | `go test ./... -race -count=1` — 73/73 PASS, no data races detected. Covers all concurrency-sensitive paths: `rngMu` in `NewSignerFromSeed`/`NewSigner`/`Sign`; bbolt keystore transactions; wallet pool refill under `OnConfirmation`. |
+| Full suite race-detector pass | `2b1f3ff` (symbiont-wallet) | `go test ./... -race -count=1` — 73/73 PASS, no data races detected. Covers all concurrency-sensitive paths: `rngMu` in `NewSignerFromSeed`/`NewSigner`/`Sign`; bbolt keystore transactions; wallet pool refill under `OnConfirmation`. |
+| **Mainnet activation parameters set** | `7912fa1c1` (QOGE/qogecoin) | `DEPLOYMENT_P2QPK` in `CMainParams`: `nStartTime=1786284720` (2026-08-09 14:12 UTC), `nTimeout=1794060720` (2026-11-07 14:12 UTC). `bit=3`, `nMinerConfirmationWindow=8064`, `nRuleChangeActivationThreshold=6048` all unchanged — this commit touched only `nStartTime`/`nTimeout`. `nMinerConfirmationWindow=8064` and `nRuleChangeActivationThreshold=6048` are long-standing values traced via `git log -L` to the file's 2022 introduction. Note: the source comment's claimed derivation `nMinerConfirmationWindow = nPowTargetTimespan / nPowTargetSpacing` does not compute to 8064 with QOGE's own constants (gives 70,560) — pre-existing, harmless documentation inaccuracy, unrelated to this commit. Timeline: `nStartTime`→STARTED 0–~5.6 days (retarget-boundary alignment); STARTED→ACTIVE with continuous signaling: exactly 11.2 days (two 8064-block windows); worst-case `nStartTime`→ACTIVE: ~16.8 days; `nTimeout` provides ~74 days of margin beyond that. 5/5 `script_p2qpk_tests` pass. Independently reviewed by Codex and Grok Build — zero discrepancies on any parameter value. |
 
 ## 6. Source reference index (qogecoin/qogecoin, branch `stable`)
 
