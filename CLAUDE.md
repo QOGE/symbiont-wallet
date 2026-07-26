@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Symbiont Wallet is a post-quantum wallet for the QOGE blockchain, implementing SIP-QOGE-PQC-01 and SIP-QOGE-PQC-02 (Phase A). It uses SLH-DSA-SHA2-128f (FIPS 205) via liboqs, enforces single-use addresses, and produces P2QPK addresses (`bq1z...`, witness version 2, Bech32m/BIP350).
 
-**Status:** Wallet-side complete (72/72 tests). Consensus-side (SIP-QOGE-PQC-02) Phase F complete — public testnet live at `167.86.81.222:42070`, P2QPK tx `357d4d0c...` confirmed in block 104. Addresses are anyone-can-spend on mainnet until the soft fork activates via governance.
+**Status:** Wallet-side complete (72/72 tests). Consensus-side (SIP-QOGE-PQC-02) Phase G complete — full BIP9 activation cycle validated under real mainnet parameters; public testnet live at `167.86.81.222:42070`. What remains: SAOGEN governance decision on `nStartTime` and formal SIP ratification. Addresses are anyone-can-spend on mainnet until the soft fork activates.
 
 **SIP documents (`docs/sips/`):**
 - `SIP-QOGE-PQC-01b.md` — SIP-QOGE-PQC-01 markdown reference: QOGE post-quantum defence architecture (SPHINCS wallet, single-use address strategy, two-layer token architecture). Includes §2.3 "SAS Participation Pathway — SOLNET-1 Migration" clarifying that PoW QOGE is excluded from SAS automation but QOGE holders can gain SAS participation by migrating to SOLNET-1's QOGE-branded Byzantine (DT-BFT) variant. (Original `.docx` also retained in `docs/sips/`.)
