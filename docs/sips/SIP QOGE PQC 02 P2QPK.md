@@ -106,7 +106,10 @@ not pick these unilaterally; flag for SAOGEN governance when reached.
 
 **Bit 3 has been selected** and used consistently across regtest and testnet
 deployments (`ALWAYS_ACTIVE`). Mainnet `nStartTime`, `nTimeout`, and miner
-signaling window remain SAOGEN governance decisions.
+signaling window remain SAOGEN governance decisions. The full BIP9 activation
+cycle has been validated end-to-end under real mainnet parameters (Phase G) —
+the remaining open item is the governance decision on `nStartTime`, not further
+technical validation.
 
 **Pre-activation property** (favorable): P2QPK outputs are anyone-can-spend
 until activation — testing can proceed on a public testnet *before*
@@ -140,6 +143,7 @@ introduce one without re-justifying against this table.
 | D | Consensus implementation (§3.3 branch + `SignatureHashP2QPK`) | ✅ DONE (local) — `SignatureHashP2QPK` + test vector (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; activation: `DEPLOYMENT_P2QPK` in `DeploymentPos` + `deploymentinfo.cpp` + `CRegTestParams.vDeployments` (`ALWAYS_ACTIVE`); `DeploymentActiveAt` gates `SCRIPT_VERIFY_P2QPK` in `GetBlockScriptFlags` (`56a2aed`) |
 | E | Regtest functional testing | ✅ DONE — regtest validation complete — `DEPLOYMENT_P2QPK` activated (`56a2aed` in QOGE/qogecoin), tampered-sig rejected via `OQS_SIG_slh_dsa_pure_sha2_128f_verify`, real SLH-DSA spend accepted and confirmed in block |
 | F | Public testnet | ✅ COMPLETE — `DEPLOYMENT_P2QPK` in `CTestNetParams` (ALWAYS_ACTIVE, bit 3, `89812b7c`); `bech32_hrp = "bqt"`; `DeploymentInfo()` wired for all chains (`rpc/blockchain.cpp:1275`); `p2qpk: active: true` on testnet and regtest. Consensus safety: `BIP9Deployment` safe defaults + explicit `NEVER_ACTIVE` in `CMainParams`/`CSigNetParams` (`09638b35`, per independent review). `address.Network` + `bqt` HRP in Symbiont Wallet (`83bbc73`). Option A liboqs depends build verified (`88c400c59`, `135c2fc0b`). `nRuleChangeActivationThreshold` fixed to 1512/2016 (`c00f6112d`). Independent BIP9 parameter review (PASS). Public testnet live at `167.86.81.222:42070`; P2QPK tx `357d4d0c...` confirmed in block 104. |
+| G | Real-parameter mainnet activation simulation | ✅ COMPLETE — Full BIP9 activation cycle validated on an isolated, air-gapped two-node local simulation using real intended mainnet parameters (`nMinerConfirmationWindow=2016`, `nRuleChangeActivationThreshold=1512`, genuine future `nStartTime`). Phase transitions confirmed at exactly the predicted heights: `DEFINED→STARTED` at 2016, `STARTED→LOCKED_IN` at 4032, `LOCKED_IN→ACTIVE` at 6048. Post-`ACTIVE`: real P2QPK spend (via `SignP2QPKInput`) confirmed on both nodes; tampered spend (three bytes flipped) rejected by `SCRIPT_VERIFY_P2QPK` (`non-mandatory-script-verify-flag (Witness program hash mismatch)`). All technical unknowns resolved. What remains: governance decision on `nStartTime` and formal SIP ratification. |
 
 ## 7. Post-Phase-F implementation (pre-mainnet)
 
