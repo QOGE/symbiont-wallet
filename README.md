@@ -5,9 +5,9 @@ SIP-QOGE-PQC-02 (Phase A).**
 
 SLH-DSA-SHA2-128f (FIPS 205) signatures | P2QPK single-use addresses (witness v2 / Bech32m) | HNDL defence
 
-> ⚠️ **EXPERIMENTAL — wallet-side core implemented and tested. Consensus-side complete through Phase G (real-parameter mainnet simulation). DO NOT USE IN PRODUCTION. DO NOT SEND FUNDS to P2QPK addresses on mainnet before soft fork activation.**
+> ⚠️ **EXPERIMENTAL — wallet-side core implemented and tested. Consensus-side complete through Phase G; mainnet activation parameters set (`nStartTime` 2026-08-09, `nTimeout` 2026-11-07). DO NOT USE IN PRODUCTION. DO NOT SEND FUNDS to P2QPK addresses on mainnet before soft fork activation.**
 
-**Status: 73/73 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real `bq1z...` / `bqt1z...` P2QPK addresses (witness version 2, Bech32m/BIP350), real 17,088-byte FIPS 205 signatures, end-to-end single-use lifecycle confirmed on Ubuntu 24 LTS. Public testnet live at `167.86.81.222:42070`. BIP9 activation cycle validated end-to-end under real mainnet parameters (Phase G).
+**Status: 73/73 tests passing.** Real SLH-DSA-SHA2-128f keypairs, real `bq1z...` / `bqt1z...` P2QPK addresses (witness version 2, Bech32m/BIP350), real 17,088-byte FIPS 205 signatures, end-to-end single-use lifecycle confirmed on Ubuntu 24 LTS. Public testnet live at `167.86.81.222:42070`. BIP9 activation cycle validated end-to-end (Phase G). **Mainnet activation parameters set** (`7912fa1c1`, 2026-07-26): `bit=3`, `nStartTime=1786284720` (2026-08-09 14:12 UTC), `nTimeout=1794060720` (2026-11-07 14:12 UTC). What remains: formal SIP ratification.
 
 ---
 
@@ -91,7 +91,7 @@ secp256k1 point at rest, defeating any script-path PQC check).
 | D | Consensus implementation (`VerifyWitnessProgram` P2QPK branch) | ✅ **COMPLETE** (local) — `SignatureHashP2QPK` (`2a4c85a`), Init() OP_2 trigger + safeguard-D tests (`468f367`), `VerifyWitnessProgram` witver==2 branch + `SCRIPT_VERIFY_P2QPK` + missing-data guard (`abb93a0`), `OQS_SIG_slh_dsa_pure_sha2_128f_verify` wired + `p2qpk_bad_sig_rejected` (`816cd06`); 5/5 tests pass; not pushed (fork+PR deferred per §9) |
 | E | Regtest functional testing | ✅ **COMPLETE** — regtest validation complete — tampered-sig rejected, real SLH-DSA spend accepted and confirmed (`56a2aed` in [QOGE/qogecoin](https://github.com/QOGE/qogecoin)) |
 | F | Public testnet | ✅ **COMPLETE** — Public testnet live at `167.86.81.222:42070`; `p2qpk: active: true` confirmed; P2QPK tx `357d4d0c...` confirmed in block 104; two-node peer network validated end-to-end. |
-| G | Real-parameter mainnet activation simulation | ✅ **COMPLETE** — Full BIP9 cycle validated on an isolated, air-gapped two-node simulation using real mainnet parameters (`nMinerConfirmationWindow=2016`, `nRuleChangeActivationThreshold=1512`, genuine future `nStartTime`). Phase transitions at exactly the predicted heights: `DEFINED→STARTED` at 2016, `STARTED→LOCKED_IN` at 4032, `LOCKED_IN→ACTIVE` at 6048. Post-`ACTIVE`: real P2QPK spend confirmed on both nodes; tampered spend correctly rejected by `SCRIPT_VERIFY_P2QPK`. All technical unknowns resolved — what remains is governance (`nStartTime` decision) and formal SIP ratification. |
+| G | Real-parameter mainnet activation simulation | ✅ **COMPLETE** — Full BIP9 cycle validated on an isolated, air-gapped two-node simulation (simulation used testnet-scale `nMinerConfirmationWindow=2016`/`nRuleChangeActivationThreshold=1512`; actual `CMainParams` values are 8064/6048). Phase transitions at exactly the predicted heights: `DEFINED→STARTED` at 2016, `STARTED→LOCKED_IN` at 4032, `LOCKED_IN→ACTIVE` at 6048. Post-`ACTIVE`: real P2QPK spend confirmed on both nodes; tampered spend correctly rejected by `SCRIPT_VERIFY_P2QPK`. All technical unknowns resolved. **Mainnet activation parameters set (`7912fa1c1`, 2026-07-26):** `bit=3`, `nStartTime=1786284720` (2026-08-09 14:12 UTC), `nTimeout=1794060720` (2026-11-07 14:12 UTC), `nMinerConfirmationWindow=8064` (5.6 days/window), `nRuleChangeActivationThreshold=6048` (75%) — last two unchanged. Timeline: `nStartTime`→STARTED 0–~5.6 days; STARTED→ACTIVE with continuous signaling exactly 11.2 days (two windows); worst-case ~16.8 days; `nTimeout` provides ~74 days margin. Independently reviewed by Codex and Grok Build — zero discrepancies. What remains: formal SIP ratification. |
 
 ### Pre-Mainnet Audit Series (Audits 1–5)
 
@@ -348,11 +348,21 @@ for full normative detail.
   node live at `167.86.81.222:42070`; P2QPK tx `357d4d0c...` confirmed in
   block 104 on public testnet.
 - **Phase G ✅ COMPLETE:** Full BIP9 activation cycle validated end-to-end on
-  an isolated, air-gapped two-node local simulation under real mainnet
-  parameters (`nMinerConfirmationWindow=2016`, `nRuleChangeActivationThreshold=1512`,
-  genuine future `nStartTime`). Phase heights confirmed at 2016 / 4032 / 6048.
-  Post-`ACTIVE`: real P2QPK spend confirmed; tampered spend correctly rejected
-  by `SCRIPT_VERIFY_P2QPK`. All technical unknowns resolved.
+  an isolated, air-gapped two-node local simulation (simulation used
+  testnet-scale 2016/1512 windows; actual `CMainParams` is 8064/6048).
+  Phase heights confirmed at 2016 / 4032 / 6048. Post-`ACTIVE`: real P2QPK
+  spend confirmed; tampered spend correctly rejected by `SCRIPT_VERIFY_P2QPK`.
+  All technical unknowns resolved.
+- **Mainnet activation parameters set ✅** (`7912fa1c1`, QOGE/qogecoin,
+  2026-07-26): `bit=3`, `nStartTime=1786284720` (2026-08-09 14:12 UTC),
+  `nTimeout=1794060720` (2026-11-07 14:12 UTC). `nMinerConfirmationWindow=8064`
+  (5.6 days/window at 1-min blocks) and `nRuleChangeActivationThreshold=6048`
+  (75%) are long-standing values, unchanged. Timeline: `nStartTime`→STARTED
+  0–~5.6 days; STARTED→ACTIVE with continuous signaling exactly 11.2 days
+  (two 8064-block windows); worst-case ~16.8 days; `nTimeout` provides ~74 days
+  margin. 5/5 `script_p2qpk_tests` pass. Independently reviewed by Codex and
+  Grok Build — zero discrepancies on any parameter value. What remains: formal
+  SIP ratification (SAOGEN governance).
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
