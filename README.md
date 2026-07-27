@@ -363,6 +363,18 @@ for full normative detail.
   margin. 5/5 `script_p2qpk_tests` pass. Independently reviewed by Codex and
   Grok Build — zero discrepancies on any parameter value. What remains: formal
   SIP ratification (SAOGEN governance).
+- **Reference production node config ✅** (`37adfd719`, QOGE/qogecoin,
+  [`contrib/qogecoin-production.conf.example`](https://github.com/QOGE/qogecoin/blob/stable/contrib/qogecoin-production.conf.example)):
+  Captures every operational lesson learned during development and testnet
+  operation so a fresh mainnet node deployment starts correct. Documented
+  lessons: (1) `changetype=bech32` — forces change outputs to SegWit v0
+  (P2WPKH) rather than Taproot; Taproot change exposes the raw public key
+  on-chain at funding time, which is exactly wrong for a PQC project whose
+  purpose is minimising at-rest key exposure; (2) `fallbackfee`/`paytxfee`/
+  `mintxfee` — fee estimation fails silently on low-activity chains without
+  these, halting all payment processing; (3) `wallet=` persistence — a wallet
+  loaded once via `loadwallet` RPC is not reloaded on restart, causing silent
+  `-18` errors after every daemon restart.
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
@@ -399,6 +411,7 @@ message-signing demo, a separate non-consensus use case).
 - [`docs/sips/SIP-QOGE-PQC-02.md`](docs/sips/SIP%20QOGE%20PQC%2002%20P2QPK.md) — condensed normative reference for SIP-02 (P2QPK consensus design), for use during Phase C/D implementation work
 - [`docs/sips/SIP-QOGE-PQC-02a.md`](docs/sips/SIP%20QOGE%20PQC%2002a%20P2QPK.md) — condensed normative reference for SIP-02a (P2QPK sighash spec), including Phase C source findings and the `P2QPKSighash` test vector
 - [`CLAUDE.md`](CLAUDE.md) — guidance for Claude Code sessions working in this repository (build prerequisites, architecture, open items)
+- [`contrib/qogecoin-production.conf.example`](https://github.com/QOGE/qogecoin/blob/stable/contrib/qogecoin-production.conf.example) (QOGE/qogecoin) — reference production node config; documents `changetype=bech32`, fee fallback, and wallet-persistence lessons learned during this project
 
 ## Governance
 
