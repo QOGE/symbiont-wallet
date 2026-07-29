@@ -389,6 +389,13 @@ for full normative detail.
   tier via `$(package)_fetch_cmds`; sha256 hash unchanged. Empirically tested
   (forced tier-1 failure, confirmed clean fallback). Independently reviewed by
   Codex and Grok Build — zero findings.
+- **Build doc reconciliation ✅** (`13bd888d3`, QOGE/qogecoin):
+  [`doc/build-ubuntu-2404.md`](https://github.com/QOGE/qogecoin/blob/stable/doc/build-ubuntu-2404.md)
+  added — the only current, tested build path for this fork, validated
+  end-to-end on fresh Ubuntu 24.04 hardware. All seven upstream platform build
+  docs renamed to `*-DEPRECATED.md` (kept for reference, untested and
+  unsupported for this fork). `doc/README.md` updated to link to the new
+  tutorial and mark the deprecated docs accordingly.
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
