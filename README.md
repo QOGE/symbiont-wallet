@@ -375,6 +375,20 @@ for full normative detail.
   these, halting all payment processing; (3) `wallet=` persistence — a wallet
   loaded once via `loadwallet` RPC is not reloaded on restart, causing silent
   `-18` errors after every daemon restart.
+- **Build fixes ✅** (`dbea00cc7`, QOGE/qogecoin): (1) `configure.ac` — liboqs
+  Option A prefix detection used `$prefix` (always empty/NONE in the depends
+  workflow) instead of `$depends_prefix` (set by `config.site.in` when
+  `CONFIG_SITE` is used); corrected to check `depends_prefix` first, falling
+  back to `$prefix`/`$ac_default_prefix` for non-depends builds. Cosmetic fix
+  only — `config.site.in`'s own `PKG_CONFIG_PATH` redirection masked the bug
+  in practice, but this removes reliance on that implicit behavior. (2)
+  `depends/packages/boost.mk` — primary source `boostorg.jfrog.io` is
+  permanently dead (JFrog discontinued free Boost hosting); synced to
+  `archives.boost.io` (matching upstream `bitcoin/bitcoin@ffbc173ca1`'s own
+  fix) and added a QOGE-hosted GitHub release as a Boost-specific fallback
+  tier via `$(package)_fetch_cmds`; sha256 hash unchanged. Empirically tested
+  (forced tier-1 failure, confirmed clean fallback). Independently reviewed by
+  Codex and Grok Build — zero findings.
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
