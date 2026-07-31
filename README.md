@@ -444,3 +444,13 @@ Governed under:
 SIP-C v2.0 | SAOGEN SAO | AI Node attribution: Claude (Anthropic)
 
 Forked from: [eomii/SPHINCS-Wallet](https://github.com/eomii/SPHINCS-Wallet) (MIT)
+
+**Note on SIP/governance documentation:** This repository references SIP
+(SAOGEN Improvement Proposal) documents and SIP-C v2.0 governance
+throughout its commit history and `docs/sips/` directory. These are
+internal SAOGEN organizational artifacts — records of design decisions,
+technical rationale, audit findings, and attribution — not a separate
+license or legal encumbrance. They impose no terms, conditions, or
+compliance requirements on anyone using, forking, modifying, or
+redistributing this code. All code in this repository, including the
+P2QPK implementation, remains unambiguously MIT-licensed in full.
