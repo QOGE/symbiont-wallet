@@ -14,3 +14,4 @@ qoge_wallet.db
 
 # OS
 .DS_Store
+/gui
