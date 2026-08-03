@@ -396,6 +396,12 @@ for full normative detail.
   docs renamed to `*-DEPRECATED.md` (kept for reference, untested and
   unsupported for this fork). `doc/README.md` updated to link to the new
   tutorial and mark the deprecated docs accordingly.
+- **Minimal Fyne GUI ✅** (`b09d0dc`, QOGE/symbiont-wallet): `cmd/gui/main.go`
+  — first working GUI covering the receive-side workflow: open/create wallet
+  (32-byte hex seed), generate a fresh P2QPK address, mark an address as
+  payment-received. Verified end-to-end on Ubuntu 24.04 desktop. Send/sign
+  and address-list views deliberately deferred — paused pending mainnet
+  activation. Run with `go run ./cmd/gui`.
 
 Once a P2QPK-aware testnet exists, `wallet.QOGETransaction` (currently a
 stub) gets replaced with the real transaction type, and
