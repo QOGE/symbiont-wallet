@@ -113,6 +113,15 @@ func main() {
 	)
 	concentrationWarning.Wrapping = fyne.TextWrapWord
 
+	copyAddrBtn := widget.NewButton("Copy Address", func() {
+		addr := addrDisplay.Text
+		if addr == "" {
+			return
+		}
+		w.Clipboard().SetContent(addr)
+		status.SetText("Address copied to clipboard.")
+	})
+
 	receiveTab := container.NewTabItem("Receive",
 		container.NewVBox(
 			widget.NewLabel("Seed (hex, 64 chars):"),
@@ -122,6 +131,7 @@ func main() {
 			newAddrBtn,
 			widget.NewLabel("Your P2QPK address:"),
 			addrDisplay,
+			copyAddrBtn,
 			widget.NewSeparator(),
 			concentrationWarning,
 			widget.NewSeparator(),
@@ -208,9 +218,10 @@ func main() {
 		}
 		var overThresholdCount int
 		for _, info := range infos {
+			addr := info.Address // capture per-iteration for the closure
 			var line string
 			if balances != nil {
-				sats := balances[info.Address]
+				sats := balances[addr]
 				if rpcclient.ExceedsConcentrationThreshold(sats) {
 					overThresholdCount++
 					// "[!]" prefix flags the row; 4-space indent on normal rows
@@ -218,20 +229,24 @@ func main() {
 					line = fmt.Sprintf("[!] #%-3d  %-8s  %-14s  %s",
 						info.Index, info.State,
 						rpcclient.FormatQOGE(sats)+" QOGE",
-						info.Address)
+						addr)
 				} else {
 					line = fmt.Sprintf("    #%-3d  %-8s  %-14s  %s",
 						info.Index, info.State,
 						rpcclient.FormatQOGE(sats)+" QOGE",
-						info.Address)
+						addr)
 				}
 			} else {
 				line = fmt.Sprintf("#%-3d  %-8s  %s",
-					info.Index, info.State, info.Address)
+					info.Index, info.State, addr)
 			}
 			lbl := widget.NewLabel(line)
 			lbl.TextStyle = fyne.TextStyle{Monospace: true}
-			addrListBox.Add(lbl)
+			copyBtn := widget.NewButton("Copy", func() {
+				w.Clipboard().SetContent(addr)
+				addrStatusLabel.SetText("Address copied to clipboard.")
+			})
+			addrListBox.Add(container.NewBorder(nil, nil, nil, copyBtn, lbl))
 		}
 		addrListBox.Refresh()
 
