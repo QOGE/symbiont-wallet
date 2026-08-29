@@ -3,14 +3,64 @@ package rpcclient
 import (
 	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
 )
 
 // SatoshisPerQOGE is 1e8 — the fixed integer scale for QOGE amounts.
-// scantxoutset returns amounts as float64 QOGE; we convert to int64 satoshis
-// by rounding to avoid floating-point drift at the boundary.
 const SatoshisPerQOGE = int64(100_000_000)
+
+// BalanceWarningThresholdSats is the single-address balance safety threshold
+// expressed in satoshis: 5,000,000 QOGE. Chosen with a large safety margin
+// below the float64 precision boundary (~67.1 million QOGE) in the RPC
+// amount-conversion path. Balances strictly above this value trigger a
+// concentration warning in the GUI.
+const BalanceWarningThresholdSats = int64(5_000_000) * SatoshisPerQOGE
+
+// ExceedsConcentrationThreshold reports whether satoshis strictly exceeds the
+// single-address balance safety threshold (5,000,000 QOGE). Exactly
+// 5,000,000 QOGE returns false; one satoshi above returns true.
+func ExceedsConcentrationThreshold(satoshis int64) bool {
+	return satoshis > BalanceWarningThresholdSats
+}
+
+// FloatQOGEToSatoshis converts a float64 QOGE amount (as returned by the
+// scantxoutset RPC) to satoshis without float64 multiplication.
+//
+// It formats the value to exactly 8 decimal places via fmt.Sprintf("%.8f",
+// amount) and then parses the result using integer arithmetic.  This avoids
+// the class of error where float64 representation of a value like 1.005 QOGE
+// produces 100499999.999… instead of 100500000, which the +0.5 rounding trick
+// can silently mis-round in edge cases near 0.5 satoshi boundaries.
+func FloatQOGEToSatoshis(amount float64) (int64, error) {
+	return parseQOGEDecimal(fmt.Sprintf("%.8f", amount))
+}
+
+// parseQOGEDecimal parses a decimal QOGE string with exactly 8 fractional
+// digits (the format produced by fmt.Sprintf("%.8f")) into satoshis using
+// pure integer arithmetic.
+func parseQOGEDecimal(s string) (int64, error) {
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) != 2 || len(parts[1]) != 8 {
+		return 0, fmt.Errorf("rpcclient: parseQOGEDecimal: expected X.YYYYYYYY, got %q", s)
+	}
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || whole < 0 {
+		return 0, fmt.Errorf("rpcclient: parseQOGEDecimal: invalid integer part %q", parts[0])
+	}
+	// Overflow check: whole * 100_000_000 must fit in int64.
+	// math.MaxInt64 (9223372036854775807) / 100_000_000 = 92_233_720_368 (floor).
+	if whole > 92_233_720_368 {
+		return 0, fmt.Errorf("rpcclient: parseQOGEDecimal: amount too large (%d QOGE)", whole)
+	}
+	frac, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || frac < 0 {
+		return 0, fmt.Errorf("rpcclient: parseQOGEDecimal: invalid fractional part %q", parts[1])
+	}
+	return whole*SatoshisPerQOGE + frac, nil
+}
 
 // P2QPKScript returns the 34-byte P2QPK scriptPubKey for a bq1z address:
 //
@@ -66,13 +116,12 @@ func AggregateBalances(result ScanResult, addrs []string) (map[string]int64, err
 	for _, u := range result.Unspents {
 		addr, ok := scriptToAddr[u.ScriptPubKey]
 		if !ok {
-			// UTXO does not correspond to any of the queried addresses.
-			// This can occur if the node returns UTXOs from non-P2QPK scripts
-			// matched by the same addr() descriptor fallback. Skip silently.
 			continue
 		}
-		// Round to satoshis: multiply then round to nearest integer.
-		satoshis := int64(u.Amount*float64(SatoshisPerQOGE) + 0.5)
+		satoshis, err := FloatQOGEToSatoshis(u.Amount)
+		if err != nil {
+			return nil, fmt.Errorf("rpcclient: AggregateBalances: %w", err)
+		}
 		balances[addr] += satoshis
 	}
 

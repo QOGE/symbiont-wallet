@@ -213,6 +213,125 @@ func TestAggregateBalances_EmptyAddressList(t *testing.T) {
 	}
 }
 
+// ── FloatQOGEToSatoshis ───────────────────────────────────────────────────────
+
+// TestFloatQOGEToSatoshis_ExactValues verifies conversion of exact QOGE amounts.
+func TestFloatQOGEToSatoshis_ExactValues(t *testing.T) {
+	cases := []struct {
+		amount float64
+		want   int64
+	}{
+		{22.0, 2_200_000_000},
+		{1.0, 100_000_000},
+		{0.0, 0},
+		{0.00000001, 1}, // 1 satoshi
+		// 92233720368.0 QOGE = math.MaxInt64/1e8 * 1e8 = max representable whole-QOGE value
+		{92_233_720_368.0, 9_223_372_036_800_000_000},
+	}
+	for _, tc := range cases {
+		got, err := FloatQOGEToSatoshis(tc.amount)
+		if err != nil {
+			t.Errorf("FloatQOGEToSatoshis(%v): unexpected error: %v", tc.amount, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("FloatQOGEToSatoshis(%v) = %d, want %d", tc.amount, got, tc.want)
+		}
+	}
+}
+
+// TestFloatQOGEToSatoshis_FloatProneValues confirms that amounts where naive
+// float64 multiplication drifts away from the true integer result are still
+// converted exactly. These are the cases the +0.5 rounding trick was meant to
+// paper over but cannot guarantee for all inputs.
+func TestFloatQOGEToSatoshis_FloatProneValues(t *testing.T) {
+	cases := []struct {
+		amount float64
+		want   int64
+		desc   string
+	}{
+		// 0.1 QOGE: float64 representation is slightly above 0.1,
+		// so 0.1 * 1e8 in float64 = 10000000.000000002 — exact via string parse.
+		{0.1, 10_000_000, "0.1 QOGE"},
+		// 0.29 QOGE: float64 representation slightly below, 0.29*1e8 ≈ 28999999.999...
+		{0.29, 29_000_000, "0.29 QOGE"},
+		// 1.005 QOGE: float64 ≈ 1.00499999999999989..., *1e8 = 100499999.999...
+		{1.005, 100_500_000, "1.005 QOGE"},
+		// 21.99999999 QOGE: near the 22 QOGE boundary
+		{21.99999999, 2_199_999_999, "21.99999999 QOGE"},
+	}
+	for _, tc := range cases {
+		got, err := FloatQOGEToSatoshis(tc.amount)
+		if err != nil {
+			t.Errorf("FloatQOGEToSatoshis(%v [%s]): unexpected error: %v", tc.amount, tc.desc, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("FloatQOGEToSatoshis(%v [%s]) = %d, want %d", tc.amount, tc.desc, got, tc.want)
+		}
+	}
+}
+
+// TestFloatQOGEToSatoshis_VsNaiveMultiply demonstrates the class of discrepancy
+// that the string-based path avoids: for 1.005 QOGE, naive float64 multiplication
+// with +0.5 rounding may return a different value.
+func TestFloatQOGEToSatoshis_VsNaiveMultiply(t *testing.T) {
+	amount := 1.005
+	want := int64(100_500_000)
+
+	// String-based path (production code) must be exact.
+	got, err := FloatQOGEToSatoshis(amount)
+	if err != nil {
+		t.Fatalf("FloatQOGEToSatoshis: %v", err)
+	}
+	if got != want {
+		t.Errorf("FloatQOGEToSatoshis(1.005) = %d, want %d", got, want)
+	}
+
+	// Naive path for comparison — document what it would return.
+	naive := int64(amount*float64(SatoshisPerQOGE) + 0.5)
+	if naive != want {
+		// This is not a test failure — it documents the motivation for the fix.
+		t.Logf("naive float64 path: 1.005 * 1e8 + 0.5 -> %d (expected %d, diff=%d)",
+			naive, want, want-naive)
+	}
+}
+
+// ── ExceedsConcentrationThreshold ────────────────────────────────────────────
+
+func TestExceedsConcentrationThreshold_ExactThreshold(t *testing.T) {
+	// Exactly 5,000,000 QOGE (BalanceWarningThresholdSats) must NOT trigger.
+	if ExceedsConcentrationThreshold(BalanceWarningThresholdSats) {
+		t.Errorf("ExceedsConcentrationThreshold(%d) = true, want false (exactly 5,000,000 QOGE should not trigger)",
+			BalanceWarningThresholdSats)
+	}
+}
+
+func TestExceedsConcentrationThreshold_OneSatoshiOver(t *testing.T) {
+	// 5,000,000 QOGE + 1 satoshi = 5,000,000.00000001 QOGE — must trigger.
+	if !ExceedsConcentrationThreshold(BalanceWarningThresholdSats + 1) {
+		t.Errorf("ExceedsConcentrationThreshold(%d) = false, want true (5,000,000.00000001 QOGE must trigger)",
+			BalanceWarningThresholdSats+1)
+	}
+}
+
+func TestExceedsConcentrationThreshold_Zero(t *testing.T) {
+	if ExceedsConcentrationThreshold(0) {
+		t.Error("ExceedsConcentrationThreshold(0) = true, want false")
+	}
+}
+
+func TestExceedsConcentrationThreshold_LargeBalance(t *testing.T) {
+	// 22 QOGE — well below threshold, must not trigger.
+	if ExceedsConcentrationThreshold(2_200_000_000) {
+		t.Error("ExceedsConcentrationThreshold(22 QOGE) = true, want false")
+	}
+	// 10,000,000 QOGE — well above threshold, must trigger.
+	if !ExceedsConcentrationThreshold(int64(10_000_000) * SatoshisPerQOGE) {
+		t.Error("ExceedsConcentrationThreshold(10,000,000 QOGE) = false, want true")
+	}
+}
+
 // ── FormatQOGE ────────────────────────────────────────────────────────────────
 
 func TestFormatQOGE(t *testing.T) {

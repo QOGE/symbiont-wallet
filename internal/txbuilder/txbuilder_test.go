@@ -75,6 +75,28 @@ func TestQOGEToSatoshis(t *testing.T) {
 	}
 }
 
+// ── QOGEToSatoshis overflow ───────────────────────────────────────────────────
+
+func TestQOGEToSatoshis_OverflowWhole(t *testing.T) {
+	// math.MaxInt64 / 100_000_000 = 92_233_720_368 (floor).
+	// 92_233_720_369 * 100_000_000 = 9_223_372_036_900_000_000 > math.MaxInt64.
+	if _, err := QOGEToSatoshis("92233720369"); err == nil {
+		t.Fatal("expected overflow error for 92233720369 QOGE, got nil")
+	}
+}
+
+func TestQOGEToSatoshis_MaxSafe(t *testing.T) {
+	// 92_233_720_368 * 100_000_000 = 9_223_372_036_800_000_000 ≤ math.MaxInt64.
+	got, err := QOGEToSatoshis("92233720368")
+	if err != nil {
+		t.Fatalf("QOGEToSatoshis(92233720368): unexpected error: %v", err)
+	}
+	want := int64(92_233_720_368) * 100_000_000
+	if got != want {
+		t.Errorf("got %d, want %d", got, want)
+	}
+}
+
 // ── CalcChange ────────────────────────────────────────────────────────────────
 
 func TestCalcChange_Normal(t *testing.T) {
@@ -115,6 +137,35 @@ func TestCalcChange_ZeroSendRejected(t *testing.T) {
 	_, err := CalcChange(100_000_000, 0, 10_000)
 	if err == nil {
 		t.Fatal("expected error for zero send amount")
+	}
+}
+
+func TestCalcChange_ZeroResult(t *testing.T) {
+	// CalcChange returning 0 is valid — exact spend. Caller must build a
+	// single-output tx rather than a zero-value change output.
+	got, err := CalcChange(100_010_000, 100_000_000, 10_000)
+	if err != nil {
+		t.Fatalf("CalcChange (exact spend): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CalcChange = %d, want 0 for exact spend", got)
+	}
+}
+
+func TestCalcChange_OverflowSendPlusFee(t *testing.T) {
+	// sendSats + feeSats overflows int64 — must be rejected.
+	// math.MaxInt64 = 9223372036854775807
+	const maxInt64 = int64(^uint64(0) >> 1)
+	_, err := CalcChange(maxInt64, maxInt64-1, 2)
+	if err == nil {
+		t.Fatal("expected overflow error when sendSats + feeSats wraps int64")
+	}
+}
+
+func TestCalcChange_NegativeFeeRejected(t *testing.T) {
+	_, err := CalcChange(100_000_000, 50_000_000, -1)
+	if err == nil {
+		t.Fatal("expected error for negative fee")
 	}
 }
 

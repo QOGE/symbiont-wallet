@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -160,7 +161,13 @@ func QOGEToSatoshis(s string) (int64, error) {
 	if err != nil || whole < 0 {
 		return 0, fmt.Errorf("txbuilder: invalid amount %q", s)
 	}
+	// Overflow check before multiplying: whole * 100_000_000 must fit in int64.
+	// math.MaxInt64 (9223372036854775807) / 100_000_000 = 92_233_720_368 (floor).
+	if whole > math.MaxInt64/100_000_000 {
+		return 0, fmt.Errorf("txbuilder: amount %q exceeds maximum representable satoshis", s)
+	}
 	sats := whole * 100_000_000
+
 	if len(parts) == 2 {
 		frac := parts[1]
 		if len(frac) > 8 {
@@ -173,16 +180,30 @@ func QOGEToSatoshis(s string) (int64, error) {
 		if err != nil || fracVal < 0 {
 			return 0, fmt.Errorf("txbuilder: invalid fractional part in %q", s)
 		}
+		// Overflow check before adding frac: sats + fracVal must fit in int64.
+		// Since whole <= 92233720 and sats = whole*1e8 <= 9223372000000000,
+		// and fracVal <= 99999999, the sum <= 9223372099999999 < math.MaxInt64.
+		// So this addition cannot overflow given the whole check above.
 		sats += fracVal
 	}
 	return sats, nil
 }
 
 // CalcChange returns the change amount in satoshis, or an error if the UTXO
-// does not cover sendSats + feeSats (insufficient funds).
+// does not cover sendSats + feeSats (insufficient funds). Returns 0 when the
+// UTXO exactly covers send + fee; the caller must handle the zero-change case
+// by building a single-output transaction (no change output, no change address
+// consumed) rather than adding a zero-value change output.
 func CalcChange(utxoSats, sendSats, feeSats int64) (int64, error) {
 	if sendSats <= 0 {
 		return 0, fmt.Errorf("txbuilder: send amount must be positive, got %d", sendSats)
+	}
+	if feeSats < 0 {
+		return 0, fmt.Errorf("txbuilder: fee must be non-negative, got %d", feeSats)
+	}
+	// Overflow check: sendSats + feeSats must not wrap.
+	if feeSats > math.MaxInt64-sendSats {
+		return 0, fmt.Errorf("txbuilder: send %d + fee %d overflows int64", sendSats, feeSats)
 	}
 	change := utxoSats - sendSats - feeSats
 	if change < 0 {

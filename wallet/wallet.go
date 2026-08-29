@@ -576,9 +576,16 @@ func p2qpkScriptPubKey(addr string) ([]byte, error) {
 }
 
 // SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
-// params.FromAddr must be in PENDING state. params.ChangeAddr must be a
-// FRESH wallet-controlled address; it is transitioned to PENDING after a
-// successful sign so it cannot be reused as change or receive address.
+// params.FromAddr must be in PENDING state.
+//
+// Change handling (two cases):
+//   - params.ChangeAddr non-empty: must be a FRESH wallet-controlled address;
+//     exactly one entry in params.Outputs must encode its P2QPK scriptPubKey;
+//     it is transitioned FRESH→PENDING after a successful sign.
+//   - params.ChangeAddr == "": no change output; params.Outputs must contain
+//     exactly one output (the recipient). Use this when CalcChange returns 0
+//     (UTXO exactly covers send + fee). No change address is consumed.
+//
 // Returns the SLH-DSA public key (32 bytes) and signature (17,088 bytes).
 // The message signed is the 32-byte P2QPKSighash — NOT canonicalMessageHash,
 // which is only for the CLI generic message-signing demo (Open Item 4).
@@ -609,37 +616,43 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrFromAddrScriptMismatch)
 	}
 
-	// M2.1: validate change routes to a FRESH wallet-controlled address before signing.
-	changeRec, err := w.index.GetRecord(params.ChangeAddr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: change address not in wallet index — "+
-			"change MUST route to a fresh wallet address: %w", err)
-	}
-	if changeRec.State != keystore.StateFresh {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
-			ErrChangeAddressNotFresh, changeRec.State)
-	}
-
-	// M2.1: verify exactly one output's script pays to the change address.
-	// Without this check a caller could supply any ChangeAddr (FRESH, passing
-	// the state-machine check above) while the actual outputs route change
-	// elsewhere — the signed commitment and the state transition would be for
-	// different addresses.
-	changeScript, err := p2qpkScriptPubKey(params.ChangeAddr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", err)
-	}
-	changeMatches := 0
-	for _, out := range params.Outputs {
-		if bytes.Equal(out.Script, changeScript) {
-			changeMatches++
+	// Change routing: two valid cases depending on whether ChangeAddr is set.
+	if params.ChangeAddr != "" {
+		// M2.1: validate change routes to a FRESH wallet-controlled address.
+		changeRec, err := w.index.GetRecord(params.ChangeAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: change address not in wallet index — "+
+				"change MUST route to a fresh wallet address: %w", err)
 		}
-	}
-	if changeMatches == 0 {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputMissing)
-	}
-	if changeMatches > 1 {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputAmbiguous)
+		if changeRec.State != keystore.StateFresh {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
+				ErrChangeAddressNotFresh, changeRec.State)
+		}
+		// M2.1: verify exactly one output's script pays to the change address.
+		changeScript, err := p2qpkScriptPubKey(params.ChangeAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", err)
+		}
+		changeMatches := 0
+		for _, out := range params.Outputs {
+			if bytes.Equal(out.Script, changeScript) {
+				changeMatches++
+			}
+		}
+		if changeMatches == 0 {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputMissing)
+		}
+		if changeMatches > 1 {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeOutputAmbiguous)
+		}
+	} else {
+		// No-change path: UTXO exactly covers send + fee.
+		// Require exactly one output (the recipient) — a zero-value change output
+		// would be non-standard and waste a wallet address.
+		if len(params.Outputs) != 1 {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: ChangeAddr empty (no-change tx) but "+
+				"%d outputs present — must have exactly 1 (recipient only)", len(params.Outputs))
+		}
 	}
 
 	sighash, err := computeP2QPKSighash(params)
@@ -666,10 +679,11 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	}
 
 	// M2.1: transition change FRESH → PENDING only after signing succeeds.
-	// This prevents the change address from ever being reused as a receive or
-	// change address on a subsequent transaction.
-	if err := w.index.MarkPending(params.ChangeAddr); err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: mark change PENDING: %w", err)
+	// Skip when ChangeAddr is empty (no-change tx — no address to transition).
+	if params.ChangeAddr != "" {
+		if err := w.index.MarkPending(params.ChangeAddr); err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: mark change PENDING: %w", err)
+		}
 	}
 
 	return rec.PublicKey, signature, nil

@@ -1235,3 +1235,133 @@ func TestListAddresses_IncludesRetired(t *testing.T) {
 		t.Errorf("retired address %s not found in ListAddresses — RETIRED must be included", addr)
 	}
 }
+
+// ── Fix 3: no-change signing path ────────────────────────────────────────────
+
+// makeNoChangeSpendParams builds valid P2QPKSpendParams with ChangeAddr == ""
+// and exactly one output (the recipient), modelling an exact-spend transaction
+// where the UTXO covers send + fee with zero remainder.
+func makeNoChangeSpendParams(t *testing.T, fromAddr, toAddr string) P2QPKSpendParams {
+	t.Helper()
+	fromHash, err := address.ToHash(fromAddr)
+	if err != nil {
+		t.Fatalf("makeNoChangeSpendParams: ToHash(%s): %v", fromAddr, err)
+	}
+	fromScript := append([]byte{0x52, 0x20}, fromHash...)
+	toHash, err := address.ToHash(toAddr)
+	if err != nil {
+		t.Fatalf("makeNoChangeSpendParams: ToHash(%s): %v", toAddr, err)
+	}
+	toScript := append([]byte{0x52, 0x20}, toHash...)
+	return P2QPKSpendParams{
+		NVersion:  2,
+		NLockTime: 0,
+		Inputs:    []SpendInput{{Vout: 0, NSequence: 0xffffffff}},
+		SpentUTXOs: []SpentUTXO{
+			{Amount: 100_010_000, Script: fromScript}, // send 100_000_000 + fee 10_000
+		},
+		Outputs:    []SpendOutput{{Amount: 100_000_000, Script: toScript}},
+		InputIndex: 0,
+		FromAddr:   fromAddr,
+		ChangeAddr: "", // exact spend — no change
+	}
+}
+
+// TestSignP2QPKInputNoChange confirms that SignP2QPKInput accepts ChangeAddr == ""
+// for an exact-spend transaction (zero change remainder), produces a valid
+// signature, and does NOT transition any address beyond the from address.
+func TestSignP2QPKInputNoChange(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived: %v", err)
+	}
+
+	// Use a second address as the recipient — it stays FRESH (it's not consumed).
+	if err := w.MarkPaymentReceived(fromAddr); err == nil {
+		// just absorb; we only need fromAddr PENDING
+	}
+	toAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (to): %v", err)
+	}
+
+	freshBefore, err := w.index.CountByState(keystore.StateFresh)
+	if err != nil {
+		t.Fatalf("CountByState FRESH: %v", err)
+	}
+
+	params := makeNoChangeSpendParams(t, fromAddr, toAddr)
+	pubKey, sig, err := w.SignP2QPKInput(params)
+	if err != nil {
+		t.Fatalf("SignP2QPKInput (no change): %v", err)
+	}
+	if len(pubKey) != 32 {
+		t.Errorf("pubKey len = %d, want 32", len(pubKey))
+	}
+	if len(sig) != 17088 {
+		t.Errorf("sig len = %d, want 17088", len(sig))
+	}
+
+	// fromAddr must still be PENDING (signing does not advance it).
+	rec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatalf("GetRecord fromAddr: %v", err)
+	}
+	if rec.State != keystore.StatePending {
+		t.Errorf("fromAddr state = %s after no-change sign, want PENDING", rec.State)
+	}
+
+	// No extra PENDING address should have been created (no change transition).
+	pendingCount, err := w.index.CountByState(keystore.StatePending)
+	if err != nil {
+		t.Fatalf("CountByState PENDING: %v", err)
+	}
+	if pendingCount != 1 {
+		t.Errorf("PENDING count = %d after no-change sign, want 1 (only fromAddr)", pendingCount)
+	}
+
+	// FRESH count must be unchanged — no change address was consumed.
+	freshAfter, err := w.index.CountByState(keystore.StateFresh)
+	if err != nil {
+		t.Fatalf("CountByState FRESH: %v", err)
+	}
+	if freshAfter != freshBefore {
+		t.Errorf("FRESH count changed from %d to %d during no-change sign", freshBefore, freshAfter)
+	}
+}
+
+// TestSignP2QPKInputNoChangeRejectsMultipleOutputs confirms that SignP2QPKInput
+// rejects a no-change transaction that has more than one output.
+func TestSignP2QPKInputNoChangeRejectsMultipleOutputs(t *testing.T) {
+	w := newTestWallet(t)
+
+	fromAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress: %v", err)
+	}
+	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+		t.Fatalf("MarkPaymentReceived: %v", err)
+	}
+	toAddr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress (to): %v", err)
+	}
+
+	params := makeNoChangeSpendParams(t, fromAddr, toAddr)
+	// Add a spurious second output — must be rejected.
+	toHash, _ := address.ToHash(toAddr)
+	params.Outputs = append(params.Outputs, SpendOutput{
+		Amount: 1_000,
+		Script: append([]byte{0x52, 0x20}, toHash...),
+	})
+
+	_, _, err = w.SignP2QPKInput(params)
+	if err == nil {
+		t.Fatal("expected error for no-change tx with 2 outputs, got nil")
+	}
+}
