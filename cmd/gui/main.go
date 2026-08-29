@@ -306,15 +306,25 @@ func main() {
 	sendStatusLabel := widget.NewLabel("")
 	sendStatusLabel.Wrapping = fyne.TextWrapWord
 
-	rawHexEntry := widget.NewMultiLineEntry()
-	rawHexEntry.Disable()
-	rawHexEntry.SetPlaceHolder("Signed transaction hex will appear here after signing.")
-	rawHexScroll := container.NewVScroll(rawHexEntry)
-	rawHexScroll.SetMinSize(fyne.NewSize(0, 100))
+	// signedTxHex holds the complete hex of the last signed transaction in
+	// memory. It is never rendered directly into a text widget — only a short
+	// preview is shown on screen to avoid freezing the GUI with 34,528 chars.
+	var signedTxHex string
+
+	rawHexPreviewLabel := widget.NewLabel("(no signed transaction yet)")
+	rawHexPreviewLabel.TextStyle = fyne.TextStyle{Monospace: true}
+
+	copyTxHexBtn := widget.NewButton("Copy Full Transaction Hex", func() {
+		if signedTxHex == "" {
+			sendStatusLabel.SetText("No signed transaction — preview and sign first.")
+			return
+		}
+		w.Clipboard().SetContent(signedTxHex)
+		sendStatusLabel.SetText("Full transaction hex copied to clipboard.")
+	})
 
 	testMempoolBtn := widget.NewButton("Test in Mempool (testmempoolaccept)", func() {
-		hexStr := rawHexEntry.Text
-		if hexStr == "" {
+		if signedTxHex == "" {
 			sendStatusLabel.SetText("No signed transaction — preview and sign first.")
 			return
 		}
@@ -322,7 +332,7 @@ func main() {
 			sendStatusLabel.SetText("No node connected — connect from the Addresses tab first.")
 			return
 		}
-		result, err := rpc.TestMempoolAccept(context.Background(), hexStr)
+		result, err := rpc.TestMempoolAccept(context.Background(), signedTxHex)
 		if err != nil {
 			sendStatusLabel.SetText(fmt.Sprintf("testmempoolaccept RPC error: %v", err))
 			return
@@ -577,9 +587,14 @@ func main() {
 					return
 				}
 
-				rawHexEntry.Enable()
-				rawHexEntry.SetText(hex.EncodeToString(raw))
-				rawHexEntry.Disable()
+				signedTxHex = hex.EncodeToString(raw)
+				// Show a short preview — never render the full 34,528-char string
+				// into a widget (confirmed cause of GUI freeze on real P2QPK tx).
+				preview := fmt.Sprintf("%d bytes  /  %d hex chars\n%s…\n…%s",
+					len(raw), len(signedTxHex),
+					signedTxHex[:64],
+					signedTxHex[len(signedTxHex)-64:])
+				rawHexPreviewLabel.SetText(preview)
 
 				statusMsg := fmt.Sprintf("Signed — %d bytes raw tx (%d bytes hex).\n"+
 					"From address is still PENDING until OnConfirmation is called after broadcast+confirm.\n",
@@ -616,7 +631,8 @@ func main() {
 			previewBtn,
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex (broadcast manually):"),
-			rawHexScroll,
+			rawHexPreviewLabel,
+			copyTxHexBtn,
 			testMempoolBtn,
 			widget.NewSeparator(),
 			sendStatusLabel,
