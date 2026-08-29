@@ -276,6 +276,53 @@ func (w *Wallet) ListPurgeEligibleAddresses(confirmationsFor func(addr string) i
 	return eligible, nil
 }
 
+// ─── Address listing ─────────────────────────────────────────────────────────
+
+// AddressInfo is a summary of one single-use address for display purposes.
+// It contains no private key material and no fabricated balance data:
+// the wallet layer has no node-RPC connection, so on-chain amounts are
+// not available here.
+type AddressInfo struct {
+	Index   uint64
+	Address string
+	State   keystore.AddressState
+}
+
+// ListAddresses returns a summary of every address in the wallet index,
+// across all lifecycle states (FRESH, PENDING, SPENT, RETIRED), ordered
+// by index ascending. Retired addresses are included so the full history
+// is visible; their private keys have been zeroed but the address string
+// and state remain in the DB permanently.
+func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
+	all := []keystore.AddressState{
+		keystore.StateFresh,
+		keystore.StatePending,
+		keystore.StateSpent,
+		keystore.StateRetired,
+	}
+	var infos []AddressInfo
+	for _, state := range all {
+		recs, err := w.index.ListByState(state)
+		if err != nil {
+			return nil, fmt.Errorf("wallet: ListAddresses: %w", err)
+		}
+		for _, rec := range recs {
+			infos = append(infos, AddressInfo{
+				Index:   rec.Index,
+				Address: rec.Address,
+				State:   rec.State,
+			})
+		}
+	}
+	// Sort by index ascending so the list is deterministic.
+	for i := 1; i < len(infos); i++ {
+		for j := i; j > 0 && infos[j].Index < infos[j-1].Index; j-- {
+			infos[j], infos[j-1] = infos[j-1], infos[j]
+		}
+	}
+	return infos, nil
+}
+
 // ─── Signing ──────────────────────────────────────────────────────────────────
 
 // SignMessage signs an arbitrary message using the key for fromAddr.

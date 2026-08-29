@@ -1108,3 +1108,130 @@ func TestDeriveAddressDeterministic(t *testing.T) {
 	}
 	t.Logf("deterministic address for seed [1..32] at index 0: %s", addr1)
 }
+
+// ─── ListAddresses ────────────────────────────────────────────────────────────
+
+// TestListAddresses_EmptyWallet confirms that a freshly opened wallet returns
+// only FRESH pre-generated addresses (the PreGenPoolSize pool), with no
+// PENDING/SPENT/RETIRED entries.
+func TestListAddresses_EmptyWallet(t *testing.T) {
+	w := newTestWallet(t)
+	infos, err := w.ListAddresses()
+	if err != nil {
+		t.Fatalf("ListAddresses: %v", err)
+	}
+	if len(infos) != PreGenPoolSize {
+		t.Fatalf("len(ListAddresses) = %d, want %d (PreGenPoolSize)", len(infos), PreGenPoolSize)
+	}
+	for i, info := range infos {
+		if info.State != keystore.StateFresh {
+			t.Errorf("infos[%d].State = %s, want FRESH", i, info.State)
+		}
+		if info.Address == "" {
+			t.Errorf("infos[%d].Address is empty", i)
+		}
+		if i > 0 && infos[i].Index <= infos[i-1].Index {
+			t.Errorf("infos not sorted by index ascending: infos[%d].Index=%d <= infos[%d].Index=%d",
+				i, infos[i].Index, i-1, infos[i-1].Index)
+		}
+	}
+}
+
+// TestListAddresses_StateTransitions confirms that after generating addresses
+// and transitioning some through MarkPaymentReceived and OnConfirmation, the
+// list accurately reflects each address's current state.
+//
+// NextReceiveAddress is a peek — it always returns the lowest-index FRESH
+// address. To obtain three distinct addresses we must advance each one out
+// of FRESH before requesting the next.
+func TestListAddresses_StateTransitions(t *testing.T) {
+	w := newTestWallet(t)
+
+	// addr0: peek, then advance to PENDING.
+	addr0, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress 0: %v", err)
+	}
+	if err := w.MarkPaymentReceived(addr0); err != nil {
+		t.Fatalf("MarkPaymentReceived addr0: %v", err)
+	}
+
+	// addr1: peek (now the next FRESH), then advance to PENDING then SPENT.
+	addr1, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress 1: %v", err)
+	}
+	if err := w.MarkPaymentReceived(addr1); err != nil {
+		t.Fatalf("MarkPaymentReceived addr1: %v", err)
+	}
+	if err := w.OnConfirmation(addr1, 1); err != nil {
+		t.Fatalf("OnConfirmation addr1: %v", err)
+	}
+
+	// addr2: peek (next FRESH after addr1 was advanced); leave it FRESH.
+	addr2, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress 2: %v", err)
+	}
+	_ = addr2
+
+	infos, err := w.ListAddresses()
+	if err != nil {
+		t.Fatalf("ListAddresses: %v", err)
+	}
+
+	// Build a map from address string to AddressInfo for easy lookup.
+	byAddr := make(map[string]AddressInfo)
+	for _, info := range infos {
+		byAddr[info.Address] = info
+	}
+
+	if got := byAddr[addr0].State; got != keystore.StatePending {
+		t.Errorf("addr0 state = %s, want PENDING", got)
+	}
+	if got := byAddr[addr1].State; got != keystore.StateSpent {
+		t.Errorf("addr1 state = %s, want SPENT", got)
+	}
+	if got := byAddr[addr2].State; got != keystore.StateFresh {
+		t.Errorf("addr2 state = %s, want FRESH", got)
+	}
+}
+
+// TestListAddresses_IncludesRetired confirms that RETIRED addresses (after key
+// purge) remain visible in the list — the address string and state are
+// retained in the DB permanently; only the private key is zeroed.
+func TestListAddresses_IncludesRetired(t *testing.T) {
+	w := newTestWallet(t)
+
+	addr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatalf("NextReceiveAddress: %v", err)
+	}
+	if err := w.MarkPaymentReceived(addr); err != nil {
+		t.Fatalf("MarkPaymentReceived: %v", err)
+	}
+	if err := w.OnConfirmation(addr, 1); err != nil {
+		t.Fatalf("OnConfirmation: %v", err)
+	}
+	// 101 confirmations required for key destruction.
+	if err := w.PurgeSpentKey(addr, 101); err != nil {
+		t.Fatalf("PurgeSpentKey: %v", err)
+	}
+
+	infos, err := w.ListAddresses()
+	if err != nil {
+		t.Fatalf("ListAddresses: %v", err)
+	}
+	var found bool
+	for _, info := range infos {
+		if info.Address == addr {
+			found = true
+			if info.State != keystore.StateRetired {
+				t.Errorf("retired address state = %s, want RETIRED", info.State)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("retired address %s not found in ListAddresses — RETIRED must be included", addr)
+	}
+}

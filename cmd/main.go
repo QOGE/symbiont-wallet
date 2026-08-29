@@ -20,12 +20,22 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/saogen/qoge-sphincs-wallet/wallet"
 )
 
-const walletDBPath = "qoge_wallet.db"
+// walletDBPath returns the absolute path to the wallet database.
+// Using os.UserHomeDir() avoids silent mismatches when the binary is
+// invoked from different working directories.
+func walletDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "qoge_wallet.db" // fallback: relative, same behaviour as before
+	}
+	return filepath.Join(home, "symbiont-wallet", "qoge_wallet.db")
+}
 
 func main() {
 	fmt.Println("╔══════════════════════════════════════════════════════════╗")
@@ -59,7 +69,7 @@ func main() {
 			fmt.Println("  Press ENTER once you have saved the seed and noted the backup requirement.")
 			bufio.NewReader(os.Stdin).ReadString('\n')
 
-			w, err = wallet.New(walletDBPath, seed)
+			w, err = wallet.New(walletDBPath(), seed)
 			if err != nil {
 				log.Fatalf("FATAL: wallet init failed: %v", err)
 			}
@@ -75,7 +85,7 @@ func main() {
 				fmt.Println("  ✗ Invalid seed. Must be exactly 64 hex characters.")
 				continue
 			}
-			w, err = wallet.New(walletDBPath, seed)
+			w, err = wallet.New(walletDBPath(), seed)
 			if err != nil {
 				log.Fatalf("FATAL: wallet open failed: %v", err)
 			}
