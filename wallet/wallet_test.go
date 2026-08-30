@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -105,6 +106,18 @@ func TestGenerateMasterSeedIsRandom(t *testing.T) {
 }
 
 // ─── Wallet initialisation ─────────────────────────────────────────────────────
+
+func TestCreateNewRejectsWrongLengthSeed(t *testing.T) {
+	for _, length := range []int{0, 31, 33} {
+		dbPath := filepath.Join(t.TempDir(), fmt.Sprintf("wallet-%d.db", length))
+		if _, err := CreateNew(dbPath, make([]byte, length)); err == nil {
+			t.Fatalf("CreateNew accepted %d-byte seed", length)
+		}
+		if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("CreateNew with %d-byte seed created a database: %v", length, err)
+		}
+	}
+}
 
 func TestCreateNewAndOpenExistingSucceedInIntendedCases(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "missing-parent", "wallet.db")

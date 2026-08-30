@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -37,6 +38,35 @@ func walletDBPath() string {
 	return filepath.Join(home, "symbiont-wallet", "qoge_wallet.db")
 }
 
+func generateSeedHex() (string, error) {
+	seed := make([]byte, 32)
+	if _, err := rand.Read(seed); err != nil {
+		return "", fmt.Errorf("generate seed with crypto/rand: %w", err)
+	}
+	defer keystore.ZeroBytes(seed)
+	return hex.EncodeToString(seed), nil
+}
+
+func decodeSeedHex(seedHex string) ([]byte, error) {
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil || len(seed) != 32 {
+		return nil, fmt.Errorf("seed must be exactly 32 bytes, hex-encoded (64 hex chars)")
+	}
+	return seed, nil
+}
+
+func decodeCreateSeedHex(seedHex string, backupConfirmed bool) ([]byte, error) {
+	seed, err := decodeSeedHex(seedHex)
+	if err != nil {
+		return nil, err
+	}
+	if !backupConfirmed {
+		keystore.ZeroBytes(seed)
+		return nil, fmt.Errorf("confirm that you have saved the seed before creating the wallet")
+	}
+	return seed, nil
+}
+
 func main() {
 	a := app.NewWithID("io.qoge.symbiont-wallet")
 	w := a.NewWindow("Symbiont Wallet")
@@ -44,6 +74,8 @@ func main() {
 
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
+	var tabs *container.AppTabs
+	var addressesTab, sendTab *container.TabItem
 
 	// ── Receive tab ────────────────────────────────────────────────────────
 
@@ -56,11 +88,63 @@ func main() {
 	seedEntry := widget.NewPasswordEntry()
 	seedEntry.SetPlaceHolder("32-byte seed, hex-encoded (64 hex chars)")
 
+	generatedSeedDisplay := widget.NewEntry()
+	generatedSeedDisplay.Disable()
+	generatedSeedDisplay.TextStyle = fyne.TextStyle{Monospace: true}
+
+	backupWarning := widget.NewLabel(
+		"SAVE THIS SEED NOW — THIS IS THE ONLY COPY. If it is lost, funds sent " +
+			"to this wallet could become permanently unrecoverable.",
+	)
+	backupWarning.Wrapping = fyne.TextWrapWord
+	backupWarning.TextStyle = fyne.TextStyle{Bold: true}
+
+	seedSavedCheck := widget.NewCheck("I have saved this seed securely", nil)
+	copySeedBtn := widget.NewButton("Copy Generated Seed", func() {
+		if generatedSeedDisplay.Text != "" {
+			w.Clipboard().SetContent(generatedSeedDisplay.Text)
+			status.SetText("Generated seed copied. Save it securely before creating the wallet.")
+		}
+	})
+	backupPanel := container.NewVBox(
+		widget.NewSeparator(),
+		backupWarning,
+		generatedSeedDisplay,
+		copySeedBtn,
+	)
+	backupPanel.Hide()
+
+	seedEntry.OnChanged = func(seedHex string) {
+		seedSavedCheck.SetChecked(false)
+		if generatedSeedDisplay.Text != "" && seedHex != generatedSeedDisplay.Text {
+			generatedSeedDisplay.SetText("")
+			backupPanel.Hide()
+		}
+	}
+
+	generateBtn := widget.NewButton("Generate New Seed", func() {
+		seedHex, err := generateSeedHex()
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		seedEntry.SetText(seedHex)
+		generatedSeedDisplay.SetText(seedHex)
+		seedSavedCheck.SetChecked(false)
+		backupPanel.Show()
+		status.SetText("New seed generated. Save the displayed seed and acknowledge the backup before creating the wallet.")
+	})
+
 	loadWallet := func(create bool) {
-		seedHex := seedEntry.Text
-		seed, err := hex.DecodeString(seedHex)
-		if err != nil || len(seed) != 32 {
-			dialog.ShowError(fmt.Errorf("seed must be exactly 32 bytes, hex-encoded (64 hex chars)"), w)
+		var seed []byte
+		var err error
+		if create {
+			seed, err = decodeCreateSeedHex(seedEntry.Text, seedSavedCheck.Checked)
+		} else {
+			seed, err = decodeSeedHex(seedEntry.Text)
+		}
+		if err != nil {
+			dialog.ShowError(err, w)
 			return
 		}
 		if wlt != nil {
@@ -78,6 +162,10 @@ func main() {
 			return
 		}
 		wlt = newWallet
+		if tabs != nil {
+			tabs.EnableItem(addressesTab)
+			tabs.EnableItem(sendTab)
+		}
 		if create {
 			status.SetText("New wallet created.")
 		} else {
@@ -127,6 +215,9 @@ func main() {
 		container.NewVBox(
 			widget.NewLabel("Seed (hex, 64 chars):"),
 			seedEntry,
+			generateBtn,
+			backupPanel,
+			seedSavedCheck,
 			openBtn,
 			createBtn,
 			widget.NewSeparator(),
@@ -306,7 +397,7 @@ func main() {
 		addrStatusLabel.SetText(summary)
 	})
 
-	addressesTab := container.NewTabItem("Addresses",
+	addressesTab = container.NewTabItem("Addresses",
 		container.NewVBox(
 			widget.NewLabel("Node RPC (optional — leave blank for state-only view):"),
 			rpcEndpoint,
@@ -661,7 +752,7 @@ func main() {
 		sendStatusLabel.SetText("Address lists refreshed.")
 	})
 
-	sendTab := container.NewTabItem("Send",
+	sendTab = container.NewTabItem("Send",
 		container.NewVBox(
 			widget.NewLabel("From address (FUNDED — confirmed and spendable):"),
 			sendFromSelect,
@@ -684,7 +775,9 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs := container.NewAppTabs(receiveTab, addressesTab, sendTab)
+	tabs = container.NewAppTabs(receiveTab, addressesTab, sendTab)
+	tabs.DisableItem(addressesTab)
+	tabs.DisableItem(sendTab)
 	w.SetContent(tabs)
 
 	w.SetCloseIntercept(func() {
