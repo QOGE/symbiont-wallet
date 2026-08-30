@@ -74,6 +74,8 @@ var (
 	ErrMasterSeedNotLoaded = errors.New("keystore: master seed not loaded — call Open first")
 	ErrInvalidSeedLength   = errors.New("keystore: invalid seed length (want 32 bytes)")
 	ErrIncompatibleDB      = errors.New("keystore: incompatible pre-five-state database; delete qoge_wallet.db and create a new wallet with a new seed")
+	ErrSeedMismatch        = errors.New("keystore: seed does not authenticate this wallet database")
+	ErrNoValidationRecord  = errors.New("keystore: wallet database has no encrypted key available for seed validation")
 )
 
 // ─── AddressRecord ────────────────────────────────────────────────────────────
@@ -166,6 +168,64 @@ func Open(dbPath string, seed []byte) (*KeyIndex, error) {
 		encKey:     encKey,
 	}
 	return ki, nil
+}
+
+// ValidateExisting opens an already-formatted database read-only, verifies its
+// schema, and authenticates seed against an encrypted private-key record. The
+// read-only preflight ensures a rejected open cannot advance bbolt metadata or
+// modify wallet data.
+func ValidateExisting(dbPath string, seed []byte) error {
+	if len(seed) != 32 {
+		return ErrInvalidSeedLength
+	}
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("keystore: open existing DB read-only: %w", err)
+	}
+	defer db.Close()
+
+	encKey, err := hkdfDerive(seed, []byte("qoge-keyindex-aes256-gcm"), 32)
+	if err != nil {
+		return fmt.Errorf("keystore: derive validation key: %w", err)
+	}
+	defer ZeroBytes(encKey)
+
+	return db.View(func(tx *bolt.Tx) error {
+		addresses := tx.Bucket(bucketAddresses)
+		meta := tx.Bucket(bucketMeta)
+		if addresses == nil || meta == nil {
+			return ErrIncompatibleDB
+		}
+		version := meta.Get(keySchemaVersion)
+		if len(version) != 8 || binary.BigEndian.Uint64(version) != schemaVersion {
+			return ErrIncompatibleDB
+		}
+
+		var blob []byte
+		err := addresses.ForEach(func(_, v []byte) error {
+			var rec AddressRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if len(rec.EncSeedBlob) > 0 {
+				blob = append([]byte(nil), rec.EncSeedBlob...)
+				return errStopIteration
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errStopIteration) {
+			return err
+		}
+		if len(blob) == 0 {
+			return ErrNoValidationRecord
+		}
+		plain, err := decryptWithKey(encKey, blob)
+		if err != nil {
+			return ErrSeedMismatch
+		}
+		ZeroBytes(plain)
+		return nil
+	})
 }
 
 // Close zeros sensitive memory and closes the database.
@@ -506,7 +566,15 @@ func (ki *KeyIndex) EncryptSeed(seed []byte) ([]byte, error) {
 // DecryptSeed decrypts a blob produced by EncryptSeed.
 // Returns the raw seed. Zero it immediately after use.
 func (ki *KeyIndex) DecryptSeed(blob []byte) ([]byte, error) {
-	block, err := aes.NewCipher(ki.encKey)
+	return ki.decryptSeed(blob)
+}
+
+func (ki *KeyIndex) decryptSeed(blob []byte) ([]byte, error) {
+	return decryptWithKey(ki.encKey, blob)
+}
+
+func decryptWithKey(encKey, blob []byte) ([]byte, error) {
+	block, err := aes.NewCipher(encKey)
 	if err != nil {
 		return nil, fmt.Errorf("keystore: AES init: %w", err)
 	}
@@ -546,6 +614,8 @@ func indexKey(idx uint64) []byte {
 
 // findRecord scans the addresses bucket for the record matching addr.
 // Returns the record, the DB key, and an error.
+var errStopIteration = errors.New("keystore: stop iteration")
+
 func findRecord(tx *bolt.Tx, addr string) (*AddressRecord, []byte, error) {
 	var found *AddressRecord
 	var foundKey []byte
@@ -557,14 +627,14 @@ func findRecord(tx *bolt.Tx, addr string) (*AddressRecord, []byte, error) {
 		if rec.Address == addr {
 			found = &rec
 			foundKey = append([]byte{}, k...)
-			return fmt.Errorf("stop") // sentinel to break ForEach
+			return errStopIteration
 		}
 		return nil
 	})
 	if found != nil {
 		return found, foundKey, nil
 	}
-	if err != nil && err.Error() != "stop" {
+	if err != nil && !errors.Is(err, errStopIteration) {
 		return nil, nil, err
 	}
 	return nil, nil, fmt.Errorf("keystore: address not found: %s", addr)

@@ -1,7 +1,7 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
 // Three tabs:
-//   - Receive:   open/create wallet and generate a fresh P2QPK address.
+//   - Receive:   explicitly open or create a wallet and generate a fresh P2QPK address.
 //   - Addresses: list every address with its lifecycle state and optional on-chain balance.
 //   - Send:      build, preview, sign, and display a raw P2QPK spend transaction.
 //     broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
@@ -56,7 +56,7 @@ func main() {
 	seedEntry := widget.NewPasswordEntry()
 	seedEntry.SetPlaceHolder("32-byte seed, hex-encoded (64 hex chars)")
 
-	openBtn := widget.NewButton("Open / Create Wallet", func() {
+	loadWallet := func(create bool) {
 		seedHex := seedEntry.Text
 		seed, err := hex.DecodeString(seedHex)
 		if err != nil || len(seed) != 32 {
@@ -67,13 +67,29 @@ func main() {
 			wlt.Close()
 			wlt = nil
 		}
-		newWallet, err := wallet.New(walletDBPath(), seed)
+		var newWallet *wallet.Wallet
+		if create {
+			newWallet, err = wallet.CreateNew(walletDBPath(), seed)
+		} else {
+			newWallet, err = wallet.OpenExisting(walletDBPath(), seed)
+		}
 		if err != nil {
 			dialog.ShowError(err, w)
 			return
 		}
 		wlt = newWallet
-		status.SetText("Wallet open.")
+		if create {
+			status.SetText("New wallet created.")
+		} else {
+			status.SetText("Existing wallet opened.")
+		}
+	}
+
+	openBtn := widget.NewButton("Open Existing Wallet", func() {
+		loadWallet(false)
+	})
+	createBtn := widget.NewButton("Create New Wallet", func() {
+		loadWallet(true)
 	})
 
 	newAddrBtn := widget.NewButton("Generate New Address", func() {
@@ -112,6 +128,7 @@ func main() {
 			widget.NewLabel("Seed (hex, 64 chars):"),
 			seedEntry,
 			openBtn,
+			createBtn,
 			widget.NewSeparator(),
 			newAddrBtn,
 			widget.NewLabel("Your P2QPK address:"),

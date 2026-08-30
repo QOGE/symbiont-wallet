@@ -69,7 +69,7 @@ func main() {
 			fmt.Println("  Press ENTER once you have saved the seed and noted the backup requirement.")
 			bufio.NewReader(os.Stdin).ReadString('\n')
 
-			w, err = wallet.New(walletDBPath(), seed)
+			w, err = wallet.CreateNew(walletDBPath(), seed)
 			if err != nil {
 				log.Fatalf("FATAL: wallet init failed: %v", err)
 			}
@@ -85,7 +85,7 @@ func main() {
 				fmt.Println("  ✗ Invalid seed. Must be exactly 64 hex characters.")
 				continue
 			}
-			w, err = wallet.New(walletDBPath(), seed)
+			w, err = wallet.OpenExisting(walletDBPath(), seed)
 			if err != nil {
 				log.Fatalf("FATAL: wallet open failed: %v", err)
 			}

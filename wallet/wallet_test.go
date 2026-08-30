@@ -1,8 +1,10 @@
 package wallet
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -13,7 +15,7 @@ import (
 )
 
 // NOTE: These tests exercise the full Symbiont Wallet stack, including the
-// signer package (CGo -> liboqs SLH-DSA-SHA2-128f). Each call to New()
+// signer package (CGo -> liboqs SLH-DSA-SHA2-128f). Each CreateNew call
 // pre-generates PreGenPoolSize (20) keypairs, so this suite is slower than
 // the address/keystore unit tests but still completes in well under a second
 // per wallet on typical hardware.
@@ -31,9 +33,9 @@ func newTestWallet(t *testing.T) *Wallet {
 	if err != nil {
 		t.Fatalf("GenerateMasterSeed failed: %v", err)
 	}
-	w, err := New(dbPath, seed)
+	w, err := CreateNew(dbPath, seed)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("CreateNew failed: %v", err)
 	}
 	t.Cleanup(func() {
 		w.Close()
@@ -104,9 +106,146 @@ func TestGenerateMasterSeedIsRandom(t *testing.T) {
 
 // ─── Wallet initialisation ─────────────────────────────────────────────────────
 
-// TestNewWalletPreGeneratesPool confirms M2.2: on Open, the wallet
+func TestCreateNewAndOpenExistingSucceedInIntendedCases(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "missing-parent", "wallet.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := CreateNew(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatalf("CreateNew failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close after CreateNew failed: %v", err)
+	}
+
+	w, err = OpenExisting(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatalf("OpenExisting failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close after OpenExisting failed: %v", err)
+	}
+}
+
+func TestCreateNewRejectsExistingWallet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := CreateNew(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatalf("initial CreateNew failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	otherSeed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateNew(dbPath, otherSeed); !errors.Is(err, ErrWalletAlreadyExists) {
+		t.Fatalf("CreateNew existing error = %v, want ErrWalletAlreadyExists", err)
+	}
+
+	// The rejected create must not alter the existing wallet.
+	w, err = OpenExisting(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatalf("existing wallet was altered: %v", err)
+	}
+	w.Close()
+}
+
+func TestOpenExistingRejectsMissingWalletWithoutCreatingIt(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "missing", "wallet.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExisting(dbPath, seed); !errors.Is(err, ErrWalletNotFound) {
+		t.Fatalf("OpenExisting missing error = %v, want ErrWalletNotFound", err)
+	}
+	if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenExisting created or changed missing path: stat error = %v", err)
+	}
+}
+
+func TestOpenExistingRejectsZeroLengthFileWithoutModifyingIt(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+	if err := os.WriteFile(dbPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHash := sha256.Sum256(before)
+
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExisting(dbPath, seed); !errors.Is(err, ErrWalletNotFound) {
+		t.Fatalf("OpenExisting zero-length error = %v, want ErrWalletNotFound", err)
+	}
+	after, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterHash := sha256.Sum256(after); afterHash != beforeHash {
+		t.Fatalf("zero-length file changed: before %x, after %x", beforeHash, afterHash)
+	}
+	if len(after) != 0 {
+		t.Fatalf("zero-length file grew to %d bytes", len(after))
+	}
+}
+
+func TestOpenExistingRejectsWrongSeed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := CreateNew(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	before, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHash := sha256.Sum256(before)
+
+	wrongSeed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExisting(dbPath, wrongSeed); !errors.Is(err, ErrWalletSeedMismatch) {
+		t.Fatalf("OpenExisting wrong-seed error = %v, want ErrWalletSeedMismatch", err)
+	}
+	after, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterHash := sha256.Sum256(after); afterHash != beforeHash {
+		t.Fatalf("wrong-seed rejection changed database: before %x, after %x", beforeHash, afterHash)
+	}
+
+	w, err = OpenExisting(dbPath, append([]byte(nil), seed...))
+	if err != nil {
+		t.Fatalf("wrong-seed attempt altered wallet: %v", err)
+	}
+	w.Close()
+}
+
+// TestCreateNewWalletPreGeneratesPool confirms M2.2: on creation, the wallet
 // pre-generates PreGenPoolSize FRESH addresses.
-func TestNewWalletPreGeneratesPool(t *testing.T) {
+func TestCreateNewWalletPreGeneratesPool(t *testing.T) {
 	w := newTestWallet(t)
 
 	count, err := w.index.CountByState(keystore.StateFresh)
@@ -114,7 +253,7 @@ func TestNewWalletPreGeneratesPool(t *testing.T) {
 		t.Fatalf("CountByState failed: %v", err)
 	}
 	if count != PreGenPoolSize {
-		t.Errorf("FRESH address count after New() = %d, want %d", count, PreGenPoolSize)
+		t.Errorf("FRESH address count after CreateNew = %d, want %d", count, PreGenPoolSize)
 	}
 }
 
@@ -1326,9 +1465,9 @@ func TestDeriveAddressDeterministic(t *testing.T) {
 
 	// First wallet instance.
 	dbPath1 := filepath.Join(t.TempDir(), "wallet1.db")
-	w1, err := New(dbPath1, append([]byte(nil), masterSeed...))
+	w1, err := CreateNew(dbPath1, append([]byte(nil), masterSeed...))
 	if err != nil {
-		t.Fatalf("New (w1): %v", err)
+		t.Fatalf("CreateNew (w1): %v", err)
 	}
 	addr1, err := w1.NextReceiveAddress()
 	if err != nil {
@@ -1338,9 +1477,9 @@ func TestDeriveAddressDeterministic(t *testing.T) {
 
 	// Second wallet instance with the same seed.
 	dbPath2 := filepath.Join(t.TempDir(), "wallet2.db")
-	w2, err := New(dbPath2, append([]byte(nil), masterSeed...))
+	w2, err := CreateNew(dbPath2, append([]byte(nil), masterSeed...))
 	if err != nil {
-		t.Fatalf("New (w2): %v", err)
+		t.Fatalf("CreateNew (w2): %v", err)
 	}
 	addr2, err := w2.NextReceiveAddress()
 	if err != nil {

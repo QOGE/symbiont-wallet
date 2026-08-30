@@ -30,6 +30,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
@@ -65,6 +67,12 @@ var ErrChangeOutputAmbiguous = errors.New("wallet: multiple outputs pay to the c
 // does not match the P2QPK scriptPubKey derived from FromAddr. The UTXO being
 // consumed must have been sent to the signing address.
 var ErrFromAddrScriptMismatch = errors.New("wallet: SpentUTXOs[InputIndex].Script does not match the P2QPK scriptPubKey for FromAddr")
+
+var (
+	ErrWalletAlreadyExists = errors.New("wallet: a wallet already exists at this path")
+	ErrWalletNotFound      = errors.New("wallet: no existing wallet found at this path")
+	ErrWalletSeedMismatch  = errors.New("wallet: seed does not match the existing wallet")
+)
 
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
 // M2.2: pre-generate 20 addresses on init and after each spend.
@@ -144,23 +152,83 @@ type Wallet struct {
 	signMu     sync.Mutex
 }
 
-// New creates or opens a QOGE SPHINCS wallet.
-//   - dbPath: path to the bbolt index database (created if not exists)
-//   - seed:   32-byte master entropy from hardware RNG (for new wallets)
-//     OR the same seed used at creation (for existing wallets)
-//
-// SECURITY: seed is zeroed from the caller's slice after this call.
-// The wallet holds its own copy internally.
-func New(dbPath string, seed []byte) (*Wallet, error) {
+// CreateNew creates a wallet only when dbPath does not already exist. Parent
+// directories are created with owner-only permissions. The O_EXCL claim makes
+// concurrent create attempts race-safe.
+func CreateNew(dbPath string, seed []byte) (*Wallet, error) {
+	ownSeed, err := takeSeed(seed)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		keystore.ZeroBytes(ownSeed)
+		return nil, fmt.Errorf("wallet: create parent directory: %w", err)
+	}
+	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		keystore.ZeroBytes(ownSeed)
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("%w — use Open Existing Wallet instead, or back up and remove the existing file first", ErrWalletAlreadyExists)
+		}
+		return nil, fmt.Errorf("wallet: create database: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		keystore.ZeroBytes(ownSeed)
+		os.Remove(dbPath)
+		return nil, fmt.Errorf("wallet: close newly created database: %w", err)
+	}
+	w, err := openWallet(dbPath, ownSeed)
+	if err != nil {
+		os.Remove(dbPath)
+		return nil, fmt.Errorf("wallet: initialize new wallet: %w", err)
+	}
+	return w, nil
+}
+
+// OpenExisting opens and authenticates an existing wallet without creating a
+// database or mutating its address pool before seed validation succeeds.
+func OpenExisting(dbPath string, seed []byte) (*Wallet, error) {
+	ownSeed, err := takeSeed(seed)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		keystore.ZeroBytes(ownSeed)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w — use Create New Wallet if this is a new seed", ErrWalletNotFound)
+		}
+		return nil, fmt.Errorf("wallet: inspect existing database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		keystore.ZeroBytes(ownSeed)
+		return nil, fmt.Errorf("%w: database path is not a regular file", ErrWalletNotFound)
+	}
+	if info.Size() == 0 {
+		keystore.ZeroBytes(ownSeed)
+		return nil, fmt.Errorf("%w: database file is empty (an interrupted creation may have left it behind)", ErrWalletNotFound)
+	}
+	if err := keystore.ValidateExisting(dbPath, ownSeed); err != nil {
+		keystore.ZeroBytes(ownSeed)
+		if errors.Is(err, keystore.ErrSeedMismatch) {
+			return nil, fmt.Errorf("%w", ErrWalletSeedMismatch)
+		}
+		return nil, fmt.Errorf("wallet: validate existing wallet: %w", err)
+	}
+	return openWallet(dbPath, ownSeed)
+}
+
+func takeSeed(seed []byte) ([]byte, error) {
 	if len(seed) != 32 {
 		return nil, fmt.Errorf("wallet: seed must be 32 bytes, got %d", len(seed))
 	}
-
-	// Copy seed so we can zero the caller's slice.
 	ownSeed := make([]byte, 32)
 	copy(ownSeed, seed)
 	keystore.ZeroBytes(seed)
+	return ownSeed, nil
+}
 
+func openWallet(dbPath string, ownSeed []byte) (*Wallet, error) {
 	ki, err := keystore.Open(dbPath, ownSeed)
 	if err != nil {
 		keystore.ZeroBytes(ownSeed)
@@ -171,7 +239,6 @@ func New(dbPath string, seed []byte) (*Wallet, error) {
 		index:      ki,
 		masterSeed: ownSeed,
 	}
-
 	// Pre-generate address pool on open. M2.2.
 	if err := w.fillPool(); err != nil {
 		w.Close()
