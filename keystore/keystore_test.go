@@ -267,12 +267,15 @@ func TestStateMachineHappyPath(t *testing.T) {
 	}
 
 	// FUNDED -> SPEND_PENDING
-	if err := ki.MarkSpendPendingAndReserveChange(addr, ""); err != nil {
+	if err := ki.MarkSpendPendingAndReserveChange(addr, "", "test-spend-txid"); err != nil {
 		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
 	}
 	rec, _ = ki.GetRecord(addr)
 	if rec.State != StateSpendPending {
 		t.Fatalf("state after signing = %s, want SPEND_PENDING", rec.State)
+	}
+	if rec.SpendTxID != "test-spend-txid" {
+		t.Fatalf("SpendTxID = %q, want test-spend-txid", rec.SpendTxID)
 	}
 
 	// SPEND_PENDING -> SPENT
@@ -308,7 +311,7 @@ func TestSigningAtomicallyReservesChange(t *testing.T) {
 	if err := ki.MarkFunded(from); err != nil {
 		t.Fatal(err)
 	}
-	if err := ki.MarkSpendPendingAndReserveChange(from, change); err != nil {
+	if err := ki.MarkSpendPendingAndReserveChange(from, change, "test-spend-txid"); err != nil {
 		t.Fatal(err)
 	}
 	fromRec, _ := ki.GetRecord(from)
@@ -402,7 +405,7 @@ func TestRetireIsPermanent(t *testing.T) {
 	if err := ki.MarkFunded(addr); err != nil {
 		t.Fatalf("MarkFunded failed: %v", err)
 	}
-	if err := ki.MarkSpendPendingAndReserveChange(addr, ""); err != nil {
+	if err := ki.MarkSpendPendingAndReserveChange(addr, "", ""); err != nil {
 		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
 	}
 	if err := ki.MarkSpent(addr); err != nil {
@@ -516,7 +519,7 @@ func TestFullLifecycleWithPoolRefill(t *testing.T) {
 	if err := ki.MarkFunded(used); err != nil {
 		t.Fatalf("MarkFunded failed: %v", err)
 	}
-	if err := ki.MarkSpendPendingAndReserveChange(used, ""); err != nil {
+	if err := ki.MarkSpendPendingAndReserveChange(used, "", ""); err != nil {
 		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
 	}
 	if err := ki.MarkSpent(used); err != nil {

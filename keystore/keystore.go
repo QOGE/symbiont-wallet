@@ -89,7 +89,8 @@ type AddressRecord struct {
 	PublicKey   []byte       `json:"public_key"` // 32-byte SLH-DSA pubkey
 	EncSeedBlob []byte       `json:"enc_seed"`   // AES-256-GCM encrypted seed (nil after retirement)
 	State       AddressState `json:"state"`
-	Reserved    bool         `json:"reserved,omitempty"` // FRESH change output committed by a signed transaction
+	Reserved    bool         `json:"reserved,omitempty"`   // FRESH change output committed by a signed transaction
+	SpendTxID   string       `json:"spend_txid,omitempty"` // txid awaited while SPEND_PENDING
 }
 
 // ─── DB bucket names ─────────────────────────────────────────────────────────
@@ -356,8 +357,9 @@ func (ki *KeyIndex) MarkFunded(addr string) error {
 }
 
 // MarkSpendPendingAndReserveChange atomically transitions the signing source
-// FUNDED → SPEND_PENDING and optionally reserves a FRESH change address.
-func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr string) error {
+// FUNDED → SPEND_PENDING, persists the transaction it is awaiting, and
+// optionally reserves a FRESH change address.
+func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr, spendTxID string) error {
 	ki.mu.Lock()
 	defer ki.mu.Unlock()
 	return ki.db.Update(func(tx *bolt.Tx) error {
@@ -380,6 +382,7 @@ func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr string
 			}
 		}
 		from.State = StateSpendPending
+		from.SpendTxID = spendTxID
 		if err := putRecord(tx, fromKey, from); err != nil {
 			return err
 		}

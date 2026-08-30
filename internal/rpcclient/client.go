@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -105,12 +107,12 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 
 // ScanUnspent is one entry from scantxoutset's "unspents" array.
 type ScanUnspent struct {
-	Txid        string  `json:"txid"`
-	Vout        uint32  `json:"vout"`
-	ScriptPubKey string `json:"scriptPubKey"` // hex-encoded
-	Desc        string  `json:"desc"`
-	Amount      float64 `json:"amount"` // QOGE (not satoshis)
-	Height      int64   `json:"height"`
+	Txid         string  `json:"txid"`
+	Vout         uint32  `json:"vout"`
+	ScriptPubKey string  `json:"scriptPubKey"` // hex-encoded
+	Desc         string  `json:"desc"`
+	Amount       float64 `json:"amount"` // QOGE (not satoshis)
+	Height       int64   `json:"height"`
 }
 
 // ScanResult is the full response from scantxoutset action="start".
@@ -147,14 +149,41 @@ func (c *Client) Ping(ctx context.Context) error {
 	return c.call(ctx, "getblockcount", nil, &count)
 }
 
+// RawTransactionInfo is the subset of getrawtransaction verbose output needed
+// for automatic SPEND_PENDING confirmation.
+type RawTransactionInfo struct {
+	TxID          string `json:"txid"`
+	Confirmations int    `json:"confirmations"`
+}
+
+var ErrTxIndexRequired = errors.New("rpcclient: qogecoind requires -txindex to look up confirmed non-wallet transactions")
+
+// TransactionConfirmations queries a tracked spend. found is false when the
+// node does not know the transaction yet (for example, before broadcast).
+func (c *Client) TransactionConfirmations(ctx context.Context, txid string) (confirmations int, found bool, err error) {
+	var info RawTransactionInfo
+	err = c.call(ctx, "getrawtransaction", []any{txid, true}, &info)
+	if err != nil {
+		var rpcErr *rpcError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -5 {
+			if strings.Contains(strings.ToLower(rpcErr.Message), "use -txindex") {
+				return 0, false, ErrTxIndexRequired
+			}
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	return info.Confirmations, true, nil
+}
+
 // ── testmempoolaccept ─────────────────────────────────────────────────────────
 
 // MempoolAcceptResult is one entry from testmempoolaccept's response array.
 type MempoolAcceptResult struct {
-	Txid         string  `json:"txid"`
-	Allowed      bool    `json:"allowed"`
-	VSize        int64   `json:"vsize"`
-	RejectReason string  `json:"reject-reason"`
+	Txid         string `json:"txid"`
+	Allowed      bool   `json:"allowed"`
+	VSize        int64  `json:"vsize"`
+	RejectReason string `json:"reject-reason"`
 	Fees         struct {
 		Base float64 `json:"base"`
 	} `json:"fees"`

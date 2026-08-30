@@ -50,7 +50,7 @@ func testFundAddress(w *Wallet, addr string) error {
 }
 
 func testSpendPending(w *Wallet, addr string) error {
-	return w.index.MarkSpendPendingAndReserveChange(addr, "")
+	return w.index.MarkSpendPendingAndReserveChange(addr, "", "")
 }
 
 func testFreshAddresses(t *testing.T, w *Wallet, n int) []string {
@@ -685,6 +685,72 @@ func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 	}
 }
 
+func TestObserveSpendConfirmationTracksZeroThenOneConfirmation(t *testing.T) {
+	w := newTestWallet(t)
+	addrs := testFreshAddresses(t, w, 2)
+	fromAddr, changeAddr := addrs[0], addrs[1]
+	if err := testFundAddress(w, fromAddr); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMinimalSpendParams(t, fromAddr, changeAddr)
+	if _, _, err := w.SignP2QPKInput(params); err != nil {
+		t.Fatalf("SignP2QPKInput: %v", err)
+	}
+	rec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.SpendTxID == "" {
+		t.Fatal("SPEND_PENDING record has no tracked spend txid")
+	}
+	if changed, err := w.ObserveSpendConfirmation(fromAddr, "unrelated-txid", 1); changed || !errors.Is(err, ErrSpendTxIDMismatch) {
+		t.Fatalf("unrelated tx confirmation = (%v, %v), want (false, ErrSpendTxIDMismatch)", changed, err)
+	}
+
+	changed, err := w.ObserveSpendConfirmation(fromAddr, rec.SpendTxID, 0)
+	if err != nil {
+		t.Fatalf("ObserveSpendConfirmation(0): %v", err)
+	}
+	if changed {
+		t.Fatal("zero-confirmation spend transitioned to SPENT")
+	}
+	rec, _ = w.index.GetRecord(fromAddr)
+	if rec.State != keystore.StateSpendPending {
+		t.Fatalf("state at zero confirmations = %s, want SPEND_PENDING", rec.State)
+	}
+
+	changed, err = w.ObserveSpendConfirmation(fromAddr, rec.SpendTxID, 1)
+	if err != nil {
+		t.Fatalf("ObserveSpendConfirmation(1): %v", err)
+	}
+	if !changed {
+		t.Fatal("one-confirmation spend did not transition")
+	}
+	rec, _ = w.index.GetRecord(fromAddr)
+	if rec.State != keystore.StateSpent {
+		t.Fatalf("state at one confirmation = %s, want SPENT", rec.State)
+	}
+}
+
+func TestP2QPKTxIDGolden(t *testing.T) {
+	var prev [32]byte
+	for i := range prev {
+		prev[i] = byte(i)
+	}
+	params := P2QPKSpendParams{
+		NVersion:  2,
+		NLockTime: 0,
+		Inputs: []SpendInput{{
+			TxIDLE: prev, Vout: 1, NSequence: 0xffffffff,
+		}},
+		Outputs: []SpendOutput{{Amount: 1000, Script: []byte{0x51}}},
+	}
+	const want = "9cdfdcf2411803e1c6b7cb2bcafd3cbbac08c469aacaad9d9725f9768adc9492"
+	if got := p2qpkTxID(params); got != want {
+		t.Fatalf("p2qpkTxID = %s, want %s", got, want)
+	}
+}
+
 func TestOnConfirmationRejectsFreshAddress(t *testing.T) {
 	w := newTestWallet(t)
 
@@ -1030,7 +1096,7 @@ func TestSignP2QPKInputDistinguishesReservedChange(t *testing.T) {
 	if err := testFundAddress(w, reservingSource); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.index.MarkSpendPendingAndReserveChange(reservingSource, reservedChange); err != nil {
+	if err := w.index.MarkSpendPendingAndReserveChange(reservingSource, reservedChange, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := testFundAddress(w, fromAddr); err != nil {

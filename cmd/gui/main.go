@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -284,6 +285,10 @@ func main() {
 		var balances map[string]int64
 		var balanceErr string
 		var fundedDetected int
+		var spentDetected int
+		var pendingTxNotFound int
+		var pendingTxIndexRequired int
+		var pendingTxUntracked int
 		if rpc != nil && len(infos) > 0 {
 			descs := make([]string, len(infos))
 			addrs := make([]string, len(infos))
@@ -333,6 +338,49 @@ func main() {
 							}
 						}
 					}
+				}
+			}
+		}
+
+		if rpc != nil {
+			for _, info := range infos {
+				if info.State != keystore.StateSpendPending {
+					continue
+				}
+				if info.SpendTxID == "" {
+					pendingTxUntracked++
+					continue
+				}
+				confirmations, found, confirmErr := rpc.TransactionConfirmations(context.Background(), info.SpendTxID)
+				if confirmErr != nil {
+					if errors.Is(confirmErr, rpcclient.ErrTxIndexRequired) {
+						pendingTxIndexRequired++
+						continue
+					}
+					if balanceErr == "" {
+						balanceErr = fmt.Sprintf("Spend confirmation lookup failed: %v", confirmErr)
+					}
+					continue
+				}
+				if !found {
+					pendingTxNotFound++
+					continue
+				}
+				changed, confirmErr := wlt.ObserveSpendConfirmation(info.Address, info.SpendTxID, confirmations)
+				if confirmErr != nil {
+					if balanceErr == "" {
+						balanceErr = fmt.Sprintf("Spend state update failed: %v", confirmErr)
+					}
+					continue
+				}
+				if changed {
+					spentDetected++
+				}
+			}
+			if spentDetected > 0 {
+				infos, err = wlt.ListAddresses()
+				if err != nil && balanceErr == "" {
+					balanceErr = fmt.Sprintf("Address reload after spend confirmation failed: %v", err)
 				}
 			}
 		}
@@ -390,6 +438,18 @@ func main() {
 			}
 			if fundedDetected > 0 {
 				summary += fmt.Sprintf(" — %d address(es) auto-detected as FUNDED", fundedDetected)
+			}
+			if spentDetected > 0 {
+				summary += fmt.Sprintf(" — %d address(es) auto-detected as SPENT", spentDetected)
+			}
+			if pendingTxNotFound > 0 {
+				summary += fmt.Sprintf(" — %d pending transaction(s) not yet broadcast or not known to the node", pendingTxNotFound)
+			}
+			if pendingTxIndexRequired > 0 {
+				summary += fmt.Sprintf(" — %d pending transaction(s) require qogecoind -txindex for confirmed-chain lookup", pendingTxIndexRequired)
+			}
+			if pendingTxUntracked > 0 {
+				summary += fmt.Sprintf(" — %d legacy/untracked SPEND_PENDING address(es) require manual confirmation", pendingTxUntracked)
 			}
 		} else {
 			summary += " — no node connected, state only"
@@ -731,7 +791,7 @@ func main() {
 				rawHexPreviewLabel.SetText(preview)
 
 				statusMsg := fmt.Sprintf("Signed — %d bytes raw tx (%d bytes hex).\n"+
-					"From address is now SPEND_PENDING until OnConfirmation is called after broadcast+confirm.\n",
+					"From address is now SPEND_PENDING until Refresh detects at least 1 on-chain confirmation.\n",
 					len(raw), len(raw)*2)
 				if changeSats > 0 {
 					statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)

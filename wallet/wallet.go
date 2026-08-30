@@ -27,6 +27,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +73,7 @@ var (
 	ErrWalletAlreadyExists = errors.New("wallet: a wallet already exists at this path")
 	ErrWalletNotFound      = errors.New("wallet: no existing wallet found at this path")
 	ErrWalletSeedMismatch  = errors.New("wallet: seed does not match the existing wallet")
+	ErrSpendTxIDMismatch   = errors.New("wallet: confirmed transaction does not match the tracked spend")
 )
 
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
@@ -305,6 +307,28 @@ func (w *Wallet) OnConfirmation(addr string, confirmations int) error {
 	return nil
 }
 
+// ObserveSpendConfirmation applies a node's confirmation result only when it
+// refers to the transaction durably tracked for this SPEND_PENDING address.
+func (w *Wallet) ObserveSpendConfirmation(addr, spendTxID string, confirmations int) (bool, error) {
+	rec, err := w.index.GetRecord(addr)
+	if err != nil {
+		return false, fmt.Errorf("wallet: ObserveSpendConfirmation: %w", err)
+	}
+	if rec.State != keystore.StateSpendPending {
+		return false, fmt.Errorf("wallet: ObserveSpendConfirmation: %w", keystore.ErrAddressNotPending)
+	}
+	if rec.SpendTxID == "" || rec.SpendTxID != spendTxID {
+		return false, ErrSpendTxIDMismatch
+	}
+	if confirmations < 1 {
+		return false, nil
+	}
+	if err := w.OnConfirmation(addr, confirmations); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // PurgeSpentKey permanently destroys the private key for a SPENT address.
 // This is OPTIONAL, MANUAL, and IRREVERSIBLE. It is never called
 // automatically by any wallet-internal logic. Calling this (or not, and
@@ -368,10 +392,11 @@ func (w *Wallet) ListPurgeEligibleAddresses(confirmationsFor func(addr string) i
 // the wallet layer has no node-RPC connection, so on-chain amounts are
 // not available here.
 type AddressInfo struct {
-	Index    uint64
-	Address  string
-	State    keystore.AddressState
-	Reserved bool
+	Index     uint64
+	Address   string
+	State     keystore.AddressState
+	Reserved  bool
+	SpendTxID string
 }
 
 // ListAddresses returns a summary of every address in the wallet index,
@@ -395,10 +420,11 @@ func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 		}
 		for _, rec := range recs {
 			infos = append(infos, AddressInfo{
-				Index:    rec.Index,
-				Address:  rec.Address,
-				State:    rec.State,
-				Reserved: rec.Reserved,
+				Index:     rec.Index,
+				Address:   rec.Address,
+				State:     rec.State,
+				Reserved:  rec.Reserved,
+				SpendTxID: rec.SpendTxID,
 			})
 		}
 	}
@@ -430,7 +456,7 @@ func (w *Wallet) SignMessage(fromAddr string, message []byte) (pubKey, sig []byt
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, ""); err != nil {
+	if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, "", ""); err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignMessage: finalize lifecycle: %w", err)
 	}
 	return pubKey, sig, nil
@@ -520,7 +546,7 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 		return nil, err
 	}
 
-	if err := w.index.MarkSpendPendingAndReserveChange(tx.From, tx.Change); err != nil {
+	if err := w.index.MarkSpendPendingAndReserveChange(tx.From, tx.Change, ""); err != nil {
 		return nil, fmt.Errorf("wallet: SignTransaction: finalize lifecycle: %w", err)
 	}
 
@@ -683,6 +709,34 @@ func p2qpkScriptPubKey(addr string) ([]byte, error) {
 	return script, nil
 }
 
+// p2qpkTxID computes the display-order txid from the transaction's non-witness
+// serialization. SegWit witness data is excluded, so the txid is known before
+// signing and can be persisted atomically with SPEND_PENDING.
+func p2qpkTxID(params P2QPKSpendParams) string {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, uint32(params.NVersion))
+	writeCompactSize(&buf, uint64(len(params.Inputs)))
+	for _, in := range params.Inputs {
+		buf.Write(in.TxIDLE[:])
+		binary.Write(&buf, binary.LittleEndian, in.Vout)
+		writeCompactSize(&buf, 0)
+		binary.Write(&buf, binary.LittleEndian, in.NSequence)
+	}
+	writeCompactSize(&buf, uint64(len(params.Outputs)))
+	for _, out := range params.Outputs {
+		binary.Write(&buf, binary.LittleEndian, uint64(out.Amount))
+		writeCompactSize(&buf, uint64(len(out.Script)))
+		buf.Write(out.Script)
+	}
+	binary.Write(&buf, binary.LittleEndian, params.NLockTime)
+	first := sha256.Sum256(buf.Bytes())
+	second := sha256.Sum256(first[:])
+	for i, j := 0, len(second)-1; i < j; i, j = i+1, j-1 {
+		second[i], second[j] = second[j], second[i]
+	}
+	return hex.EncodeToString(second[:])
+}
+
 // SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
 // params.FromAddr must be in FUNDED state.
 //
@@ -791,7 +845,8 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sign: %w", err)
 	}
 
-	if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr); err != nil {
+	spendTxID := p2qpkTxID(params)
+	if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID); err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: finalize lifecycle: %w", err)
 	}
 
