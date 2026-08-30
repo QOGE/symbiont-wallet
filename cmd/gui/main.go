@@ -68,6 +68,19 @@ func decodeCreateSeedHex(seedHex string, backupConfirmed bool) ([]byte, error) {
 	return seed, nil
 }
 
+func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired bool) (visible []wallet.AddressInfo, hidden int) {
+	visible = make([]wallet.AddressInfo, 0, len(infos))
+	for _, info := range infos {
+		historical := info.State == keystore.StateSpent || info.State == keystore.StateRetired
+		if historical && !showSpentRetired {
+			hidden++
+			continue
+		}
+		visible = append(visible, info)
+	}
+	return visible, hidden
+}
+
 func main() {
 	a := app.NewWithID("io.qoge.symbiont-wallet")
 	w := a.NewWindow("Symbiont Wallet")
@@ -242,6 +255,99 @@ func main() {
 	addrStatusLabel := widget.NewLabel("Open a wallet, then press Refresh.")
 	addrStatusLabel.Wrapping = fyne.TextWrapWord
 
+	type addressRenderState struct {
+		infos                  []wallet.AddressInfo
+		balances               map[string]int64
+		balanceErr             string
+		fundedDetected         int
+		spentDetected          int
+		pendingTxNotFound      int
+		pendingTxIndexRequired int
+		pendingTxUntracked     int
+		nodeConnected          bool
+	}
+	var lastAddressRender addressRenderState
+	var hasAddressSnapshot bool
+	var showSpentRetired bool
+
+	renderAddressList := func() {
+		if !hasAddressSnapshot {
+			return
+		}
+		visible, hidden := filterAddressInfos(lastAddressRender.infos, showSpentRetired)
+		addrListBox.RemoveAll()
+		if len(visible) == 0 {
+			addrListBox.Add(widget.NewLabel("(no visible addresses)"))
+		}
+		var overThresholdCount int
+		for _, info := range visible {
+			addr := info.Address
+			stateLabel := info.State.String()
+			if info.Reserved {
+				stateLabel = "FRESH/RESERVED"
+			}
+			var line string
+			if lastAddressRender.balances != nil {
+				sats := lastAddressRender.balances[addr]
+				if rpcclient.ExceedsConcentrationThreshold(sats) {
+					overThresholdCount++
+					line = fmt.Sprintf("[!] #%-3d  %-13s %-14s  %s",
+						info.Index, stateLabel, rpcclient.FormatQOGE(sats)+" QOGE", addr)
+				} else {
+					line = fmt.Sprintf("    #%-3d  %-13s %-14s  %s",
+						info.Index, stateLabel, rpcclient.FormatQOGE(sats)+" QOGE", addr)
+				}
+			} else {
+				line = fmt.Sprintf("#%-3d  %-13s %s", info.Index, stateLabel, addr)
+			}
+			lbl := widget.NewLabel(line)
+			lbl.TextStyle = fyne.TextStyle{Monospace: true}
+			copyBtn := widget.NewButton("Copy", func() {
+				w.Clipboard().SetContent(addr)
+				addrStatusLabel.SetText("Address copied to clipboard.")
+			})
+			addrListBox.Add(container.NewBorder(nil, nil, nil, copyBtn, lbl))
+		}
+		addrListBox.Refresh()
+
+		summary := fmt.Sprintf("%d address(es)", len(lastAddressRender.infos))
+		if hidden > 0 {
+			summary += fmt.Sprintf(" (%d spent/retired hidden)", hidden)
+		}
+		if lastAddressRender.balanceErr != "" {
+			summary += " — " + lastAddressRender.balanceErr
+		} else if lastAddressRender.balances != nil {
+			if overThresholdCount > 0 {
+				summary += fmt.Sprintf(" — [!] %d visible address(es) exceed the recommended single-address limit", overThresholdCount)
+			} else {
+				summary += " — balances from node"
+			}
+			if lastAddressRender.fundedDetected > 0 {
+				summary += fmt.Sprintf(" — %d address(es) auto-detected as FUNDED", lastAddressRender.fundedDetected)
+			}
+			if lastAddressRender.spentDetected > 0 {
+				summary += fmt.Sprintf(" — %d address(es) auto-detected as SPENT", lastAddressRender.spentDetected)
+			}
+			if lastAddressRender.pendingTxNotFound > 0 {
+				summary += fmt.Sprintf(" — %d pending transaction(s) not yet broadcast or not known to the node", lastAddressRender.pendingTxNotFound)
+			}
+			if lastAddressRender.pendingTxIndexRequired > 0 {
+				summary += fmt.Sprintf(" — %d pending transaction(s) require qogecoind -txindex for confirmed-chain lookup", lastAddressRender.pendingTxIndexRequired)
+			}
+			if lastAddressRender.pendingTxUntracked > 0 {
+				summary += fmt.Sprintf(" — %d legacy/untracked SPEND_PENDING address(es) require manual confirmation", lastAddressRender.pendingTxUntracked)
+			}
+		} else if !lastAddressRender.nodeConnected {
+			summary += " — no node connected, state only"
+		}
+		addrStatusLabel.SetText(summary)
+	}
+
+	showSpentRetiredCheck := widget.NewCheck("Show spent/retired addresses", func(show bool) {
+		showSpentRetired = show
+		renderAddressList()
+	})
+
 	rpcEndpoint := widget.NewEntry()
 	rpcEndpoint.SetPlaceHolder("host:port  (e.g. 127.0.0.1:8332)")
 	rpcUser := widget.NewEntry()
@@ -385,76 +491,19 @@ func main() {
 			}
 		}
 
-		addrListBox.RemoveAll()
-		if len(infos) == 0 {
-			addrListBox.Add(widget.NewLabel("(no addresses)"))
+		lastAddressRender = addressRenderState{
+			infos:                  infos,
+			balances:               balances,
+			balanceErr:             balanceErr,
+			fundedDetected:         fundedDetected,
+			spentDetected:          spentDetected,
+			pendingTxNotFound:      pendingTxNotFound,
+			pendingTxIndexRequired: pendingTxIndexRequired,
+			pendingTxUntracked:     pendingTxUntracked,
+			nodeConnected:          rpc != nil,
 		}
-		var overThresholdCount int
-		for _, info := range infos {
-			addr := info.Address // capture per-iteration for the closure
-			stateLabel := info.State.String()
-			if info.Reserved {
-				stateLabel = "FRESH/RESERVED"
-			}
-			var line string
-			if balances != nil {
-				sats := balances[addr]
-				if rpcclient.ExceedsConcentrationThreshold(sats) {
-					overThresholdCount++
-					// "[!]" prefix flags the row; 4-space indent on normal rows
-					// keeps columns aligned in a monospace font.
-					line = fmt.Sprintf("[!] #%-3d  %-13s %-14s  %s",
-						info.Index, stateLabel,
-						rpcclient.FormatQOGE(sats)+" QOGE",
-						addr)
-				} else {
-					line = fmt.Sprintf("    #%-3d  %-13s %-14s  %s",
-						info.Index, stateLabel,
-						rpcclient.FormatQOGE(sats)+" QOGE",
-						addr)
-				}
-			} else {
-				line = fmt.Sprintf("#%-3d  %-13s %s",
-					info.Index, stateLabel, addr)
-			}
-			lbl := widget.NewLabel(line)
-			lbl.TextStyle = fyne.TextStyle{Monospace: true}
-			copyBtn := widget.NewButton("Copy", func() {
-				w.Clipboard().SetContent(addr)
-				addrStatusLabel.SetText("Address copied to clipboard.")
-			})
-			addrListBox.Add(container.NewBorder(nil, nil, nil, copyBtn, lbl))
-		}
-		addrListBox.Refresh()
-
-		summary := fmt.Sprintf("%d address(es)", len(infos))
-		if balanceErr != "" {
-			summary += " — " + balanceErr
-		} else if balances != nil {
-			if overThresholdCount > 0 {
-				summary += fmt.Sprintf(" — [!] %d address(es) exceed the recommended single-address limit", overThresholdCount)
-			} else {
-				summary += " — balances from node"
-			}
-			if fundedDetected > 0 {
-				summary += fmt.Sprintf(" — %d address(es) auto-detected as FUNDED", fundedDetected)
-			}
-			if spentDetected > 0 {
-				summary += fmt.Sprintf(" — %d address(es) auto-detected as SPENT", spentDetected)
-			}
-			if pendingTxNotFound > 0 {
-				summary += fmt.Sprintf(" — %d pending transaction(s) not yet broadcast or not known to the node", pendingTxNotFound)
-			}
-			if pendingTxIndexRequired > 0 {
-				summary += fmt.Sprintf(" — %d pending transaction(s) require qogecoind -txindex for confirmed-chain lookup", pendingTxIndexRequired)
-			}
-			if pendingTxUntracked > 0 {
-				summary += fmt.Sprintf(" — %d legacy/untracked SPEND_PENDING address(es) require manual confirmation", pendingTxUntracked)
-			}
-		} else {
-			summary += " — no node connected, state only"
-		}
-		addrStatusLabel.SetText(summary)
+		hasAddressSnapshot = true
+		renderAddressList()
 	})
 
 	addressesTab = container.NewTabItem("Addresses",
@@ -467,6 +516,7 @@ func main() {
 			rpcStatusLabel,
 			widget.NewSeparator(),
 			refreshBtn,
+			showSpentRetiredCheck,
 			addrListScroll,
 			widget.NewSeparator(),
 			addrStatusLabel,
@@ -483,8 +533,8 @@ func main() {
 	//   5. Click "Sign" in dialog → signs, serializes BIP144, displays raw hex
 	//   6. Broadcast manually: qogecoin-cli sendrawtransaction <hex>
 	//
-	// After broadcast+confirmation, call OnConfirmation on the From address
-	// (currently a CLI-only operation) to mark it SPENT.
+	// Refresh automatically marks the source SPENT after its tracked transaction
+	// reaches one on-chain confirmation.
 
 	sendFromSelect := widget.NewSelect(nil, nil)
 	sendFromSelect.PlaceHolder = "(no FUNDED addresses — refresh after 20 confirmations)"
