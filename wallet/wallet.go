@@ -43,6 +43,14 @@ import (
 // index. Change MUST route to a new, unused wallet-controlled address.
 var ErrChangeAddressNotFresh = errors.New("wallet: change address is not FRESH — change must route to a new unused wallet address")
 
+// ErrChangeAddressReserved is returned when a change address is FRESH but
+// already committed to another signed transaction.
+var ErrChangeAddressReserved = errors.New("wallet: change address is FRESH but reserved by another signed transaction")
+
+// ErrFromAddressNotFunded is returned when transaction signing is attempted
+// from any lifecycle state other than FUNDED.
+var ErrFromAddressNotFunded = errors.New("wallet: source address is not FUNDED")
+
 // ErrChangeOutputMissing is returned when no output in the transaction pays
 // to the designated change address. A signed transaction must include the
 // change output it committed to — absent it, the change output could be
@@ -413,9 +421,12 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 		return nil, fmt.Errorf("wallet: SignTransaction: change address not in index — "+
 			"change MUST route to a fresh wallet address: %w", err)
 	}
-	if changeRec.State != keystore.StateFresh || changeRec.Reserved {
-		return nil, fmt.Errorf("wallet: SignTransaction: change address is %s (want FRESH) — "+
-			"INVARIANT VIOLATION: change must route to a new unused address", changeRec.State)
+	if changeRec.State != keystore.StateFresh {
+		return nil, fmt.Errorf("wallet: SignTransaction: %w (got %s)",
+			ErrChangeAddressNotFresh, changeRec.State)
+	}
+	if changeRec.Reserved {
+		return nil, fmt.Errorf("wallet: SignTransaction: %w", ErrChangeAddressReserved)
 	}
 
 	// M2.1: verify exactly one output pays to the change address.
@@ -627,8 +638,8 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address not found: %w", err)
 	}
 	if rec.State != keystore.StateFunded {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want FUNDED)",
-			params.FromAddr, rec.State)
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w: address %s is %s",
+			ErrFromAddressNotFunded, params.FromAddr, rec.State)
 	}
 
 	// Verify that SpentUTXOs[InputIndex].Script matches the P2QPK scriptPubKey
@@ -656,9 +667,12 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: change address not in wallet index — "+
 				"change MUST route to a fresh wallet address: %w", err)
 		}
-		if changeRec.State != keystore.StateFresh || changeRec.Reserved {
+		if changeRec.State != keystore.StateFresh {
 			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
 				ErrChangeAddressNotFresh, changeRec.State)
+		}
+		if changeRec.Reserved {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrChangeAddressReserved)
 		}
 		// M2.1: verify exactly one output's script pays to the change address.
 		changeScript, err := p2qpkScriptPubKey(params.ChangeAddr)
