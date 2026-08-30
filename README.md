@@ -25,14 +25,21 @@ wallet/wallet.go     — Orchestration: wires all packages, enforces all invaria
 ## Address Lifecycle (Single-Use Invariant)
 
 ```
-[FRESH] ──► [PENDING] ──► [SPENT] ──► [RETIRED]
-                                          │
-                                    privkey zeroed
+[FRESH] ──► [FUNDED] ──► [SPEND_PENDING] ──► [SPENT] ──► [RETIRED]
+                                                               │
+                                                         privkey zeroed
 ```
 
-No address ever goes FRESH → PENDING twice. RETIRED is permanent. Verified
+`FUNDED` is detected automatically from a positive `scantxoutset` balance
+whose shallowest UTXO has at least `FundingMinConfirmations` (default 20).
+Successful signing moves the source to `SPEND_PENDING`; change remains FRESH
+with a persisted reservation until it matures into FUNDED. RETIRED is permanent. Verified
 in `keystore_test.go` and exercised end-to-end (41 full cycles, zero repeats)
 in `wallet_test.go:TestFullSymbiontLifecycle`.
+
+**Database compatibility:** this lifecycle intentionally has no migration.
+Pre-five-state databases are rejected. Delete `qoge_wallet.db` and create a
+fresh wallet with a new seed; do not attempt to reuse or map old records.
 
 ## Address Format — P2QPK (Pay to Quantum Public Key)
 

@@ -128,6 +128,53 @@ func AggregateBalances(result ScanResult, addrs []string) (map[string]int64, err
 	return balances, nil
 }
 
+// FundingStatus is the balance and shallowest-UTXO confirmation depth for an
+// address. Using the shallowest depth ensures all of the detected balance has
+// reached the wallet's funding threshold before it becomes spendable.
+type FundingStatus struct {
+	BalanceSats   int64
+	Confirmations int
+}
+
+// AnalyzeFunding maps scantxoutset results to wallet addresses and computes
+// each address's total balance plus the minimum confirmation depth of its UTXOs.
+func AnalyzeFunding(result ScanResult, addrs []string) (map[string]FundingStatus, error) {
+	scriptToAddr := make(map[string]string, len(addrs))
+	statuses := make(map[string]FundingStatus, len(addrs))
+	for _, addr := range addrs {
+		script, err := P2QPKScript(addr)
+		if err != nil {
+			return nil, err
+		}
+		scriptToAddr[hex.EncodeToString(script)] = addr
+		statuses[addr] = FundingStatus{}
+	}
+	for _, u := range result.Unspents {
+		addr, ok := scriptToAddr[u.ScriptPubKey]
+		if !ok {
+			continue
+		}
+		sats, err := FloatQOGEToSatoshis(u.Amount)
+		if err != nil {
+			return nil, fmt.Errorf("rpcclient: AnalyzeFunding: %w", err)
+		}
+		if sats <= 0 {
+			continue
+		}
+		confirmations := int(result.Height - u.Height + 1)
+		if confirmations < 0 {
+			confirmations = 0
+		}
+		status := statuses[addr]
+		status.BalanceSats += sats
+		if status.Confirmations == 0 || confirmations < status.Confirmations {
+			status.Confirmations = confirmations
+		}
+		statuses[addr] = status
+	}
+	return statuses, nil
+}
+
 // FormatQOGE formats an int64 satoshi amount as a QOGE decimal string with
 // exactly 8 decimal places, e.g. 220000000 → "2.20000000".
 func FormatQOGE(satoshis int64) string {

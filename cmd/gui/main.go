@@ -1,10 +1,10 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
 // Three tabs:
-//   - Receive:   open/create wallet, generate fresh P2QPK address, mark payment received.
+//   - Receive:   open/create wallet and generate a fresh P2QPK address.
 //   - Addresses: list every address with its lifecycle state and optional on-chain balance.
 //   - Send:      build, preview, sign, and display a raw P2QPK spend transaction.
-//               broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
+//     broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
 package main
 
 import (
@@ -90,21 +90,6 @@ func main() {
 		status.SetText("New address generated — share this to receive funds.")
 	})
 
-	markReceivedEntry := widget.NewEntry()
-	markReceivedEntry.SetPlaceHolder("Address that received a payment")
-
-	markReceivedBtn := widget.NewButton("Mark Payment Received", func() {
-		if wlt == nil {
-			dialog.ShowError(fmt.Errorf("open a wallet first"), w)
-			return
-		}
-		if err := wlt.MarkPaymentReceived(markReceivedEntry.Text); err != nil {
-			dialog.ShowError(err, w)
-			return
-		}
-		status.SetText("Address marked PENDING — awaiting confirmation before spend.")
-	})
-
 	concentrationWarning := widget.NewLabel(
 		"For technical safety, avoid holding more than 5,000,000 QOGE in a " +
 			"single address. Very large single-address balances can affect how this " +
@@ -134,9 +119,6 @@ func main() {
 			copyAddrBtn,
 			widget.NewSeparator(),
 			concentrationWarning,
-			widget.NewSeparator(),
-			markReceivedEntry,
-			markReceivedBtn,
 			widget.NewSeparator(),
 			status,
 		),
@@ -193,6 +175,7 @@ func main() {
 
 		var balances map[string]int64
 		var balanceErr string
+		var fundedDetected int
 		if rpc != nil && len(infos) > 0 {
 			descs := make([]string, len(infos))
 			addrs := make([]string, len(infos))
@@ -208,6 +191,40 @@ func main() {
 				if err != nil {
 					balanceErr = fmt.Sprintf("Balance aggregation error: %v", err)
 					balances = nil
+				} else {
+					freshAddrs := make([]string, 0)
+					for _, info := range infos {
+						if info.State == keystore.StateFresh {
+							freshAddrs = append(freshAddrs, info.Address)
+						}
+					}
+					funding, fundingErr := rpcclient.AnalyzeFunding(result, freshAddrs)
+					if fundingErr != nil {
+						balanceErr = fmt.Sprintf("Funding analysis error: %v", fundingErr)
+					} else {
+						for _, addr := range freshAddrs {
+							fs := funding[addr]
+							changed, observeErr := wlt.ObserveFunding(addr, fs.BalanceSats, fs.Confirmations)
+							if observeErr != nil {
+								balanceErr = fmt.Sprintf("Funding state update failed: %v", observeErr)
+								break
+							}
+							if changed {
+								fundedDetected++
+							}
+						}
+						if fundedDetected > 0 && balanceErr == "" {
+							infos, err = wlt.ListAddresses()
+							if err != nil {
+								balanceErr = fmt.Sprintf("Address reload failed: %v", err)
+							}
+							for _, info := range infos {
+								if _, ok := balances[info.Address]; !ok {
+									balances[info.Address] = 0
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -219,6 +236,10 @@ func main() {
 		var overThresholdCount int
 		for _, info := range infos {
 			addr := info.Address // capture per-iteration for the closure
+			stateLabel := info.State.String()
+			if info.Reserved {
+				stateLabel = "FRESH/RESERVED"
+			}
 			var line string
 			if balances != nil {
 				sats := balances[addr]
@@ -226,19 +247,19 @@ func main() {
 					overThresholdCount++
 					// "[!]" prefix flags the row; 4-space indent on normal rows
 					// keeps columns aligned in a monospace font.
-					line = fmt.Sprintf("[!] #%-3d  %-8s  %-14s  %s",
-						info.Index, info.State,
+					line = fmt.Sprintf("[!] #%-3d  %-13s %-14s  %s",
+						info.Index, stateLabel,
 						rpcclient.FormatQOGE(sats)+" QOGE",
 						addr)
 				} else {
-					line = fmt.Sprintf("    #%-3d  %-8s  %-14s  %s",
-						info.Index, info.State,
+					line = fmt.Sprintf("    #%-3d  %-13s %-14s  %s",
+						info.Index, stateLabel,
 						rpcclient.FormatQOGE(sats)+" QOGE",
 						addr)
 				}
 			} else {
-				line = fmt.Sprintf("#%-3d  %-8s  %s",
-					info.Index, info.State, addr)
+				line = fmt.Sprintf("#%-3d  %-13s %s",
+					info.Index, stateLabel, addr)
 			}
 			lbl := widget.NewLabel(line)
 			lbl.TextStyle = fyne.TextStyle{Monospace: true}
@@ -258,6 +279,9 @@ func main() {
 				summary += fmt.Sprintf(" — [!] %d address(es) exceed the recommended single-address limit", overThresholdCount)
 			} else {
 				summary += " — balances from node"
+			}
+			if fundedDetected > 0 {
+				summary += fmt.Sprintf(" — %d address(es) auto-detected as FUNDED", fundedDetected)
 			}
 		} else {
 			summary += " — no node connected, state only"
@@ -284,7 +308,7 @@ func main() {
 	// ── Send tab ───────────────────────────────────────────────────────────
 	//
 	// Flow:
-	//   1. Select From address (must be PENDING — has received a payment)
+	//   1. Select From address (must be FUNDED)
 	//   2. Select To address (must be FRESH — wallet-controlled)
 	//   3. Enter amount in QOGE
 	//   4. Click "Preview" → fetches UTXO, computes change, shows confirm dialog
@@ -295,7 +319,7 @@ func main() {
 	// (currently a CLI-only operation) to mark it SPENT.
 
 	sendFromSelect := widget.NewSelect(nil, nil)
-	sendFromSelect.PlaceHolder = "(no PENDING addresses — mark payment received first)"
+	sendFromSelect.PlaceHolder = "(no FUNDED addresses — refresh after 20 confirmations)"
 
 	sendToSelect := widget.NewSelect(nil, nil)
 	sendToSelect.PlaceHolder = "(no FRESH addresses)"
@@ -357,18 +381,20 @@ func main() {
 		if err != nil {
 			return
 		}
-		var pending, fresh []string
+		var funded, fresh []string
 		for _, info := range infos {
 			switch info.State {
-			case keystore.StatePending:
-				pending = append(pending, info.Address)
+			case keystore.StateFunded:
+				funded = append(funded, info.Address)
 			case keystore.StateFresh:
-				fresh = append(fresh, info.Address)
+				if !info.Reserved {
+					fresh = append(fresh, info.Address)
+				}
 			}
 		}
-		sendFromSelect.Options = pending
-		if len(pending) == 0 {
-			sendFromSelect.PlaceHolder = "(no PENDING addresses — mark payment received first)"
+		sendFromSelect.Options = funded
+		if len(funded) == 0 {
+			sendFromSelect.PlaceHolder = "(no FUNDED addresses — refresh after 20 confirmations)"
 			sendFromSelect.Selected = ""
 		}
 		sendFromSelect.Refresh()
@@ -395,7 +421,7 @@ func main() {
 
 		fromAddr := sendFromSelect.Selected
 		if fromAddr == "" {
-			sendStatusLabel.SetText("Select a From address (PENDING).")
+			sendStatusLabel.SetText("Select a From address (FUNDED).")
 			return
 		}
 		toAddr := sendToSelect.Selected
@@ -597,10 +623,10 @@ func main() {
 				rawHexPreviewLabel.SetText(preview)
 
 				statusMsg := fmt.Sprintf("Signed — %d bytes raw tx (%d bytes hex).\n"+
-					"From address is still PENDING until OnConfirmation is called after broadcast+confirm.\n",
+					"From address is now SPEND_PENDING until OnConfirmation is called after broadcast+confirm.\n",
 					len(raw), len(raw)*2)
 				if changeSats > 0 {
-					statusMsg += fmt.Sprintf("Change address %s is now PENDING.\n", changeAddr)
+					statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)
 				}
 				statusMsg += "Broadcast manually: qogecoin-cli sendrawtransaction <hex>"
 				sendStatusLabel.SetText(statusMsg)
@@ -620,7 +646,7 @@ func main() {
 
 	sendTab := container.NewTabItem("Send",
 		container.NewVBox(
-			widget.NewLabel("From address (PENDING — has received a payment):"),
+			widget.NewLabel("From address (FUNDED — confirmed and spendable):"),
 			sendFromSelect,
 			widget.NewLabel("To address (FRESH — wallet-controlled recipient):"),
 			sendToSelect,

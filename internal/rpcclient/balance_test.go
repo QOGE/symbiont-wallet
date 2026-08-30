@@ -213,6 +213,28 @@ func TestAggregateBalances_EmptyAddressList(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFundingUsesShallowestUTXO(t *testing.T) {
+	addr := makeTestAddr(t, 9)
+	result := ScanResult{
+		Height: 100,
+		Unspents: []ScanUnspent{
+			{ScriptPubKey: makeScript(t, addr), Amount: 1.25, Height: 70}, // 31 confirmations
+			{ScriptPubKey: makeScript(t, addr), Amount: 0.75, Height: 90}, // 11 confirmations
+		},
+	}
+	statuses, err := AnalyzeFunding(result, []string{addr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statuses[addr]
+	if status.BalanceSats != 200_000_000 {
+		t.Fatalf("balance = %d, want 200000000", status.BalanceSats)
+	}
+	if status.Confirmations != 11 {
+		t.Fatalf("confirmations = %d, want shallowest depth 11", status.Confirmations)
+	}
+}
+
 // ── FloatQOGEToSatoshis ───────────────────────────────────────────────────────
 
 // TestFloatQOGEToSatoshis_ExactValues verifies conversion of exact QOGE amounts.

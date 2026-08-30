@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
@@ -38,6 +39,15 @@ func newTestWallet(t *testing.T) *Wallet {
 		w.Close()
 	})
 	return w
+}
+
+func testFundAddress(w *Wallet, addr string) error {
+	_, err := w.ObserveFunding(addr, 1, FundingMinConfirmations)
+	return err
+}
+
+func testSpendPending(w *Wallet, addr string) error {
+	return w.index.MarkSpendPendingAndReserveChange(addr, "")
 }
 
 // ─── Master seed ──────────────────────────────────────────────────────────────
@@ -130,6 +140,31 @@ func TestNextReceiveAddressDoesNotConsumePool(t *testing.T) {
 	}
 }
 
+func TestObserveFundingRequiresPositiveBalanceAndDepth(t *testing.T) {
+	w := newTestWallet(t)
+	addr, err := w.NextReceiveAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		balance int64
+		depth   int
+	}{{0, FundingMinConfirmations}, {1, FundingMinConfirmations - 1}} {
+		changed, err := w.ObserveFunding(addr, tc.balance, tc.depth)
+		if err != nil || changed {
+			t.Fatalf("ObserveFunding(%d,%d) = changed %v err %v, want no-op", tc.balance, tc.depth, changed, err)
+		}
+	}
+	changed, err := w.ObserveFunding(addr, 1, FundingMinConfirmations)
+	if err != nil || !changed {
+		t.Fatalf("ObserveFunding at threshold = changed %v err %v", changed, err)
+	}
+	rec, _ := w.index.GetRecord(addr)
+	if rec.State != keystore.StateFunded {
+		t.Fatalf("state = %s, want FUNDED", rec.State)
+	}
+}
+
 // ─── Payment received ────────────────────────────────────────────────────────
 
 func TestMarkPaymentReceivedTransitionsState(t *testing.T) {
@@ -139,15 +174,14 @@ func TestMarkPaymentReceivedTransitionsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
-
 	rec, err := w.index.GetRecord(addr)
 	if err != nil {
 		t.Fatalf("GetRecord failed: %v", err)
 	}
-	if rec.State != keystore.StatePending {
+	if rec.State != keystore.StateFunded {
 		t.Errorf("state after MarkPaymentReceived = %s, want PENDING", rec.State)
 	}
 }
@@ -159,10 +193,10 @@ func TestMarkPaymentReceivedTwiceFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("first MarkPaymentReceived failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err == nil {
+	if err := testFundAddress(w, addr); err == nil {
 		t.Error("second MarkPaymentReceived on the same address should fail " +
 			"(single-use invariant)")
 	}
@@ -192,10 +226,9 @@ func TestSignAndVerifyMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
-
 	msg := []byte("Symbiont Wallet M1.5 integration test")
 	pubKey, sig, err := w.SignMessage(addr, msg)
 	if err != nil {
@@ -228,6 +261,35 @@ func TestSignAndVerifyMessage(t *testing.T) {
 	}
 }
 
+func TestConcurrentSigningAllowsOnlyOneSuccess(t *testing.T) {
+	w := newTestWallet(t)
+	addr, _ := w.NextReceiveAddress()
+	if err := testFundAddress(w, addr); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := w.SignMessage(addr, []byte("one spend only"))
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent signatures = %d, want exactly 1", successes)
+	}
+}
+
 func TestVerifySignatureRejectsTamperedMessage(t *testing.T) {
 	w := newTestWallet(t)
 
@@ -235,7 +297,7 @@ func TestVerifySignatureRejectsTamperedMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -262,7 +324,7 @@ func TestSignTransactionWithValidChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(from); err != nil {
+	if err := testFundAddress(w, from); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -287,8 +349,8 @@ func TestSignTransactionWithValidChange(t *testing.T) {
 		Amount: 1000,
 		Change: change,
 		Outputs: []SpendOutput{
-			{Amount: 900, Script: []byte{0x51}},               // recipient output (OP_1 placeholder)
-			{Amount: 100, Script: changeScript},                // change output
+			{Amount: 900, Script: []byte{0x51}}, // recipient output (OP_1 placeholder)
+			{Amount: 100, Script: changeScript}, // change output
 		},
 		MessageID: []byte("tx-001-payload"),
 	}
@@ -323,7 +385,7 @@ func TestSignTransactionRejectsNonFreshChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(from); err != nil {
+	if err := testFundAddress(w, from); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -350,7 +412,7 @@ func TestSignTransactionRejectsUnknownChangeAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(from); err != nil {
+	if err := testFundAddress(w, from); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -391,7 +453,7 @@ func TestOnConfirmationFlagsWithoutDestroying(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -426,8 +488,11 @@ func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 
 	// Only confirmations < 1 (i.e. 0 or negative) are no-ops.
@@ -439,8 +504,8 @@ func TestOnConfirmationNoOpBelowMinConfirmations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetRecord failed: %v", err)
 		}
-		if rec.State != keystore.StatePending {
-			t.Errorf("confirmations=%d: state = %s, want PENDING (not yet confirmed in any block)",
+		if rec.State != keystore.StateSpendPending {
+			t.Errorf("confirmations=%d: state = %s, want SPEND_PENDING (not yet confirmed in any block)",
 				confs, rec.State)
 		}
 		if rec.EncSeedBlob == nil {
@@ -472,8 +537,11 @@ func TestSignMessageAfterSpendFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
@@ -502,13 +570,16 @@ func TestPurgeSpentKeyRequiresSpentState(t *testing.T) {
 		t.Fatal("PurgeSpentKey on FRESH address should fail")
 	}
 
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
 	// PENDING — must reject.
 	if err := w.PurgeSpentKey(addr, KeyDestructionMinConfirmations); err == nil {
 		t.Fatal("PurgeSpentKey on PENDING address should fail")
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 
 	if err := w.OnConfirmation(addr, 1); err != nil {
@@ -546,8 +617,11 @@ func TestPurgeSpentKeyRequiresMinConfirmations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation failed: %v", err)
@@ -587,17 +661,19 @@ func TestListPurgeEligibleAddressesFiltersCorrectly(t *testing.T) {
 
 	// addr1: SPENT, eligible (high confirmations)
 	addr1, _ := w.NextReceiveAddress()
-	w.MarkPaymentReceived(addr1)
+	testFundAddress(w, addr1)
+	testSpendPending(w, addr1)
 	w.OnConfirmation(addr1, 1)
 
 	// addr2: SPENT, NOT eligible (low confirmations — will return 0)
 	addr2, _ := w.NextReceiveAddress()
-	w.MarkPaymentReceived(addr2)
+	testFundAddress(w, addr2)
+	testSpendPending(w, addr2)
 	w.OnConfirmation(addr2, 1)
 
 	// addr3: PENDING (not yet confirmed)
 	addr3, _ := w.NextReceiveAddress()
-	w.MarkPaymentReceived(addr3)
+	testFundAddress(w, addr3)
 
 	// addr4: FRESH (never touched)
 	addr4, _ := w.NextReceiveAddress()
@@ -605,7 +681,8 @@ func TestListPurgeEligibleAddressesFiltersCorrectly(t *testing.T) {
 
 	// addr5: RETIRED via PurgeSpentKey
 	addr5, _ := w.NextReceiveAddress()
-	w.MarkPaymentReceived(addr5)
+	testFundAddress(w, addr5)
+	testSpendPending(w, addr5)
 	w.OnConfirmation(addr5, 1)
 	w.PurgeSpentKey(addr5, KeyDestructionMinConfirmations)
 
@@ -704,7 +781,7 @@ func TestSignP2QPKInputRejectsNonFreshChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -726,7 +803,7 @@ func TestSignP2QPKInputTransitionsChangeAfterSigning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -759,22 +836,22 @@ func TestSignP2QPKInputTransitionsChangeAfterSigning(t *testing.T) {
 		t.Errorf("sig length = %d, want %d", len(sig), slhdsa.SignatureSize)
 	}
 
-	// After signing: change must be PENDING, not FRESH.
+	// After signing: change remains FRESH but is reserved.
 	changeRec, err = w.index.GetRecord(changeAddr)
 	if err != nil {
 		t.Fatalf("GetRecord (change, after) failed: %v", err)
 	}
-	if changeRec.State != keystore.StatePending {
-		t.Errorf("change address state after signing = %s, want PENDING", changeRec.State)
+	if changeRec.State != keystore.StateFresh || !changeRec.Reserved {
+		t.Errorf("change address after signing = state %s reserved %v, want FRESH reserved", changeRec.State, changeRec.Reserved)
 	}
 
-	// fromAddr must still be PENDING (sign does not advance it).
+	// The source is consumed for signing immediately.
 	fromRec, err := w.index.GetRecord(fromAddr)
 	if err != nil {
 		t.Fatalf("GetRecord (from, after) failed: %v", err)
 	}
-	if fromRec.State != keystore.StatePending {
-		t.Errorf("from address state after signing = %s, want PENDING", fromRec.State)
+	if fromRec.State != keystore.StateSpendPending {
+		t.Errorf("from address state after signing = %s, want SPEND_PENDING", fromRec.State)
 	}
 }
 
@@ -788,7 +865,7 @@ func TestSignP2QPKInputRejectsNoMatchingOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 	changeAddr, err := w.NextReceiveAddress()
@@ -824,7 +901,7 @@ func TestSignP2QPKInputRejectsMismatchedFromScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 	changeAddr, err := w.NextReceiveAddress()
@@ -850,7 +927,7 @@ func TestSignP2QPKInputRejectsMismatchedFromScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRecord failed: %v", err)
 	}
-	if rec.State != keystore.StatePending {
+	if rec.State != keystore.StateFunded {
 		t.Errorf("fromAddr state after rejected sign = %s, want PENDING", rec.State)
 	}
 }
@@ -873,17 +950,20 @@ func TestOnConfirmationRefillsPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
-	// Pool should have dropped by 1 (one address now PENDING, not FRESH).
+	// Funding detection immediately refills the available FRESH pool.
 	mid, err := w.index.CountByState(keystore.StateFresh)
 	if err != nil {
 		t.Fatalf("CountByState failed: %v", err)
 	}
-	if mid != PreGenPoolSize-1 {
-		t.Errorf("FRESH count after MarkPaymentReceived = %d, want %d", mid, PreGenPoolSize-1)
+	if mid != PreGenPoolSize {
+		t.Errorf("FRESH count after funding detection = %d, want %d", mid, PreGenPoolSize)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 
 	if err := w.OnConfirmation(addr, 1); err != nil {
@@ -912,7 +992,7 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress failed: %v", err)
 	}
-	if err := w.MarkPaymentReceived(receiveAddr); err != nil {
+	if err := testFundAddress(w, receiveAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived failed: %v", err)
 	}
 
@@ -983,8 +1063,11 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 			t.Fatal("spent address was returned by NextReceiveAddress — single-use invariant violated")
 		}
 		// Use it up so the loop advances to the next FRESH address.
-		if err := w.MarkPaymentReceived(addr); err != nil {
+		if err := testFundAddress(w, addr); err != nil {
 			t.Fatalf("MarkPaymentReceived failed: %v", err)
+		}
+		if err := testSpendPending(w, addr); err != nil {
+			t.Fatalf("mark SPEND_PENDING: %v", err)
 		}
 		if err := w.OnConfirmation(addr, 1); err != nil {
 			t.Fatalf("OnConfirmation failed: %v", err)
@@ -1152,7 +1235,7 @@ func TestListAddresses_StateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress 0: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr0); err != nil {
+	if err := testFundAddress(w, addr0); err != nil {
 		t.Fatalf("MarkPaymentReceived addr0: %v", err)
 	}
 
@@ -1161,8 +1244,11 @@ func TestListAddresses_StateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress 1: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr1); err != nil {
+	if err := testFundAddress(w, addr1); err != nil {
 		t.Fatalf("MarkPaymentReceived addr1: %v", err)
+	}
+	if err := testSpendPending(w, addr1); err != nil {
+		t.Fatalf("mark SPEND_PENDING addr1: %v", err)
 	}
 	if err := w.OnConfirmation(addr1, 1); err != nil {
 		t.Fatalf("OnConfirmation addr1: %v", err)
@@ -1186,7 +1272,7 @@ func TestListAddresses_StateTransitions(t *testing.T) {
 		byAddr[info.Address] = info
 	}
 
-	if got := byAddr[addr0].State; got != keystore.StatePending {
+	if got := byAddr[addr0].State; got != keystore.StateFunded {
 		t.Errorf("addr0 state = %s, want PENDING", got)
 	}
 	if got := byAddr[addr1].State; got != keystore.StateSpent {
@@ -1207,8 +1293,11 @@ func TestListAddresses_IncludesRetired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress: %v", err)
 	}
-	if err := w.MarkPaymentReceived(addr); err != nil {
+	if err := testFundAddress(w, addr); err != nil {
 		t.Fatalf("MarkPaymentReceived: %v", err)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark SPEND_PENDING: %v", err)
 	}
 	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation: %v", err)
@@ -1277,14 +1366,11 @@ func TestSignP2QPKInputNoChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived: %v", err)
 	}
 
 	// Use a second address as the recipient — it stays FRESH (it's not consumed).
-	if err := w.MarkPaymentReceived(fromAddr); err == nil {
-		// just absorb; we only need fromAddr PENDING
-	}
 	toAddr, err := w.NextReceiveAddress()
 	if err != nil {
 		t.Fatalf("NextReceiveAddress (to): %v", err)
@@ -1307,17 +1393,17 @@ func TestSignP2QPKInputNoChange(t *testing.T) {
 		t.Errorf("sig len = %d, want 17088", len(sig))
 	}
 
-	// fromAddr must still be PENDING (signing does not advance it).
+	// fromAddr moves to SPEND_PENDING after signing.
 	rec, err := w.index.GetRecord(fromAddr)
 	if err != nil {
 		t.Fatalf("GetRecord fromAddr: %v", err)
 	}
-	if rec.State != keystore.StatePending {
-		t.Errorf("fromAddr state = %s after no-change sign, want PENDING", rec.State)
+	if rec.State != keystore.StateSpendPending {
+		t.Errorf("fromAddr state = %s after no-change sign, want SPEND_PENDING", rec.State)
 	}
 
-	// No extra PENDING address should have been created (no change transition).
-	pendingCount, err := w.index.CountByState(keystore.StatePending)
+	// Only the source should be SPEND_PENDING (there is no change reservation).
+	pendingCount, err := w.index.CountByState(keystore.StateSpendPending)
 	if err != nil {
 		t.Fatalf("CountByState PENDING: %v", err)
 	}
@@ -1344,7 +1430,7 @@ func TestSignP2QPKInputNoChangeRejectsMultipleOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextReceiveAddress: %v", err)
 	}
-	if err := w.MarkPaymentReceived(fromAddr); err != nil {
+	if err := testFundAddress(w, fromAddr); err != nil {
 		t.Fatalf("MarkPaymentReceived: %v", err)
 	}
 	toAddr, err := w.NextReceiveAddress()

@@ -4,11 +4,39 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
+	bolt "go.etcd.io/bbolt"
 )
+
+func TestOpenRejectsPreFiveStateDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		addresses, err := tx.CreateBucket(bucketAddresses)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucket(bucketMeta); err != nil {
+			return err
+		}
+		return addresses.Put(indexKey(0), []byte(`{"state":1}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	_, err = Open(dbPath, testSeed())
+	if !errors.Is(err, ErrIncompatibleDB) {
+		t.Fatalf("Open old database error = %v, want ErrIncompatibleDB", err)
+	}
+}
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
 
@@ -229,16 +257,25 @@ func TestStateMachineHappyPath(t *testing.T) {
 		t.Fatalf("GenerateAddress failed: %v", err)
 	}
 
-	// FRESH -> PENDING
-	if err := ki.MarkPending(addr); err != nil {
+	// FRESH -> FUNDED
+	if err := ki.MarkFunded(addr); err != nil {
 		t.Fatalf("MarkPending failed: %v", err)
 	}
 	rec, _ := ki.GetRecord(addr)
-	if rec.State != StatePending {
+	if rec.State != StateFunded {
 		t.Fatalf("state after MarkPending = %s, want PENDING", rec.State)
 	}
 
-	// PENDING -> SPENT
+	// FUNDED -> SPEND_PENDING
+	if err := ki.MarkSpendPendingAndReserveChange(addr, ""); err != nil {
+		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
+	}
+	rec, _ = ki.GetRecord(addr)
+	if rec.State != StateSpendPending {
+		t.Fatalf("state after signing = %s, want SPEND_PENDING", rec.State)
+	}
+
+	// SPEND_PENDING -> SPENT
 	if err := ki.MarkSpent(addr); err != nil {
 		t.Fatalf("MarkSpent failed: %v", err)
 	}
@@ -263,6 +300,38 @@ func TestStateMachineHappyPath(t *testing.T) {
 	}
 }
 
+func TestSigningAtomicallyReservesChange(t *testing.T) {
+	ki := openTestIndex(t)
+	deriveFn := mockDeriveFn(ki)
+	from, _ := ki.GenerateAddress(deriveFn)
+	change, _ := ki.GenerateAddress(deriveFn)
+	if err := ki.MarkFunded(from); err != nil {
+		t.Fatal(err)
+	}
+	if err := ki.MarkSpendPendingAndReserveChange(from, change); err != nil {
+		t.Fatal(err)
+	}
+	fromRec, _ := ki.GetRecord(from)
+	changeRec, _ := ki.GetRecord(change)
+	if fromRec.State != StateSpendPending {
+		t.Fatalf("source state = %s, want SPEND_PENDING", fromRec.State)
+	}
+	if changeRec.State != StateFresh || !changeRec.Reserved {
+		t.Fatalf("change = state %s reserved %v, want FRESH reserved", changeRec.State, changeRec.Reserved)
+	}
+	next, err := ki.NextFreshAddress()
+	if err == nil && next == change {
+		t.Fatal("reserved change address was returned as the next receive address")
+	}
+	if err := ki.MarkFunded(change); err != nil {
+		t.Fatal(err)
+	}
+	changeRec, _ = ki.GetRecord(change)
+	if changeRec.State != StateFunded || changeRec.Reserved {
+		t.Fatalf("mature change = state %s reserved %v, want FUNDED unreserved", changeRec.State, changeRec.Reserved)
+	}
+}
+
 // ─── State machine: invariant violations ───────────────────────────────────────
 
 // TestSingleUseInvariant_DoubleMarkPending is the core security test:
@@ -276,14 +345,14 @@ func TestSingleUseInvariant_DoubleMarkPending(t *testing.T) {
 		t.Fatalf("GenerateAddress failed: %v", err)
 	}
 
-	if err := ki.MarkPending(addr); err != nil {
+	if err := ki.MarkFunded(addr); err != nil {
 		t.Fatalf("first MarkPending failed: %v", err)
 	}
 
-	// Second call must fail with ErrAddressAlreadyUsed.
-	err = ki.MarkPending(addr)
-	if err != ErrAddressAlreadyUsed {
-		t.Fatalf("second MarkPending: got %v, want ErrAddressAlreadyUsed", err)
+	// Second call must fail with ErrAddressNotFresh.
+	err = ki.MarkFunded(addr)
+	if err != ErrAddressNotFresh {
+		t.Fatalf("second MarkPending: got %v, want ErrAddressNotFresh", err)
 	}
 }
 
@@ -311,7 +380,7 @@ func TestRetireWithoutSpentFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateAddress failed: %v", err)
 	}
-	if err := ki.MarkPending(addr); err != nil {
+	if err := ki.MarkFunded(addr); err != nil {
 		t.Fatalf("MarkPending failed: %v", err)
 	}
 
@@ -330,8 +399,11 @@ func TestRetireIsPermanent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateAddress failed: %v", err)
 	}
-	if err := ki.MarkPending(addr); err != nil {
+	if err := ki.MarkFunded(addr); err != nil {
 		t.Fatalf("MarkPending failed: %v", err)
+	}
+	if err := ki.MarkSpendPendingAndReserveChange(addr, ""); err != nil {
+		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
 	}
 	if err := ki.MarkSpent(addr); err != nil {
 		t.Fatalf("MarkSpent failed: %v", err)
@@ -341,8 +413,8 @@ func TestRetireIsPermanent(t *testing.T) {
 	}
 
 	// Any further transition attempts must fail — RETIRED is terminal.
-	if err := ki.MarkPending(addr); err != ErrAddressAlreadyUsed {
-		t.Errorf("MarkPending on RETIRED address: got %v, want ErrAddressAlreadyUsed", err)
+	if err := ki.MarkFunded(addr); err != ErrAddressNotFresh {
+		t.Errorf("MarkPending on RETIRED address: got %v, want ErrAddressNotFresh", err)
 	}
 	if err := ki.MarkSpent(addr); err != ErrAddressNotPending {
 		t.Errorf("MarkSpent on RETIRED address: got %v, want ErrAddressNotPending", err)
@@ -441,8 +513,11 @@ func TestFullLifecycleWithPoolRefill(t *testing.T) {
 		t.Fatalf("NextFreshAddress failed: %v", err)
 	}
 
-	if err := ki.MarkPending(used); err != nil {
+	if err := ki.MarkFunded(used); err != nil {
 		t.Fatalf("MarkPending failed: %v", err)
+	}
+	if err := ki.MarkSpendPendingAndReserveChange(used, ""); err != nil {
+		t.Fatalf("MarkSpendPendingAndReserveChange failed: %v", err)
 	}
 	if err := ki.MarkSpent(used); err != nil {
 		t.Fatalf("MarkSpent failed: %v", err)

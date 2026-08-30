@@ -10,15 +10,16 @@
 // is handled here and cannot be bypassed by callers.
 //
 // SIP-QOGE-PQC-01 compliance checkpoints (all enforced here):
-//   [M1.3] HD index counter with encrypted persistence
-//   [M1.4] Address state machine with hard invariants
-//   [M1.5] Reuse prevention: OnConfirmation flags SPENT at ≥1 confirmation.
-//          Key destruction is separate, optional, manual — see PurgeSpentKey.
-//   [M1.6] Integration point for QOGE chain tx format (see SignTransaction)
-//   [M1.7] Taproot disabled — enforced in address package; double-checked here
-//   [M2.1] Change routing: SignP2QPKInput and SignTransaction enforce FRESH
-//          change address before signing and transition it PENDING after.
-//   [M2.2] Address pre-generation pool (N=20)
+//
+//	[M1.3] HD index counter with encrypted persistence
+//	[M1.4] Address state machine with hard invariants
+//	[M1.5] Reuse prevention: successful signing marks SPEND_PENDING;
+//	       OnConfirmation flags SPENT at ≥1 confirmation.
+//	       Key destruction is separate, optional, manual — see PurgeSpentKey.
+//	[M1.6] Integration point for QOGE chain tx format (see SignTransaction)
+//	[M1.7] Taproot disabled — enforced in address package; double-checked here
+//	[M2.1] Change routing: signing reserves an unreserved FRESH change address.
+//	[M2.2] Address pre-generation pool (N=20)
 package wallet
 
 import (
@@ -29,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
@@ -59,6 +61,10 @@ var ErrFromAddrScriptMismatch = errors.New("wallet: SpentUTXOs[InputIndex].Scrip
 // PreGenPoolSize is the number of FRESH addresses to maintain in the pool.
 // M2.2: pre-generate 20 addresses on init and after each spend.
 const PreGenPoolSize = 20
+
+// FundingMinConfirmations is the depth at which a positive balance becomes
+// FUNDED and spendable. It is intentionally independent of key destruction.
+const FundingMinConfirmations = 20
 
 // MessagePrefix is prepended before hashing any message for signing.
 // Mirrors the ref repo's "Qogecoin Signed Message:" prefix, preventing
@@ -106,7 +112,7 @@ func SetKeyDestructionMinConfirmations(n int) error {
 // type once the chain's wire format is defined. The SignTransaction method
 // below shows the integration pattern.
 type QOGETransaction struct {
-	From      string        // Sender address (must be PENDING in index)
+	From      string        // Sender address (must be FUNDED in index)
 	To        string        // Recipient address
 	Amount    uint64        // In QOGE base units
 	Change    string        // Change address — MUST be a fresh address from this wallet
@@ -127,12 +133,13 @@ type SignedTransaction struct {
 type Wallet struct {
 	index      *keystore.KeyIndex
 	masterSeed []byte // held in memory; zeroed on Close
+	signMu     sync.Mutex
 }
 
 // New creates or opens a QOGE SPHINCS wallet.
 //   - dbPath: path to the bbolt index database (created if not exists)
 //   - seed:   32-byte master entropy from hardware RNG (for new wallets)
-//             OR the same seed used at creation (for existing wallets)
+//     OR the same seed used at creation (for existing wallets)
 //
 // SECURITY: seed is zeroed from the caller's slice after this call.
 // The wallet holds its own copy internally.
@@ -176,8 +183,7 @@ func (w *Wallet) Close() error {
 // ─── Address operations ───────────────────────────────────────────────────────
 
 // NextReceiveAddress returns the next FRESH address for receiving a payment.
-// The address is NOT yet marked PENDING — call MarkPaymentReceived when a
-// payment is detected in the mempool.
+// Reserved change addresses are excluded.
 func (w *Wallet) NextReceiveAddress() (string, error) {
 	addr, err := w.index.NextFreshAddress()
 	if err != nil {
@@ -186,18 +192,22 @@ func (w *Wallet) NextReceiveAddress() (string, error) {
 	return addr, nil
 }
 
-// MarkPaymentReceived transitions addr FRESH → PENDING.
-// Call this when a payment to addr is detected in the mempool.
-// Returns ErrAddressAlreadyUsed if addr was already used — this is a
-// hard invariant violation and must be logged and investigated.
-func (w *Wallet) MarkPaymentReceived(addr string) error {
-	if err := w.index.MarkPending(addr); err != nil {
-		return fmt.Errorf("wallet: MarkPaymentReceived: %w", err)
+// ObserveFunding transitions addr FRESH → FUNDED only after a node scan
+// reports a positive balance at the configured confirmation depth.
+func (w *Wallet) ObserveFunding(addr string, balanceSats int64, confirmations int) (bool, error) {
+	if balanceSats <= 0 || confirmations < FundingMinConfirmations {
+		return false, nil
 	}
-	return nil
+	if err := w.index.MarkFunded(addr); err != nil {
+		return false, fmt.Errorf("wallet: ObserveFunding: %w", err)
+	}
+	if err := w.fillPool(); err != nil {
+		fmt.Printf("wallet: WARNING pool refill failed after funding detection: %v\n", err)
+	}
+	return true, nil
 }
 
-// OnConfirmation flags addr SPENT once its spending transaction has at least
+// OnConfirmation transitions addr SPEND_PENDING → SPENT once its spending transaction has at least
 // one confirmation. Returns nil (no-op) if confirmations < 1.
 //
 // This prevents address reuse immediately on confirmation — it does NOT destroy
@@ -283,20 +293,22 @@ func (w *Wallet) ListPurgeEligibleAddresses(confirmationsFor func(addr string) i
 // the wallet layer has no node-RPC connection, so on-chain amounts are
 // not available here.
 type AddressInfo struct {
-	Index   uint64
-	Address string
-	State   keystore.AddressState
+	Index    uint64
+	Address  string
+	State    keystore.AddressState
+	Reserved bool
 }
 
 // ListAddresses returns a summary of every address in the wallet index,
-// across all lifecycle states (FRESH, PENDING, SPENT, RETIRED), ordered
+// across all lifecycle states, ordered
 // by index ascending. Retired addresses are included so the full history
 // is visible; their private keys have been zeroed but the address string
 // and state remain in the DB permanently.
 func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 	all := []keystore.AddressState{
 		keystore.StateFresh,
-		keystore.StatePending,
+		keystore.StateFunded,
+		keystore.StateSpendPending,
 		keystore.StateSpent,
 		keystore.StateRetired,
 	}
@@ -308,9 +320,10 @@ func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 		}
 		for _, rec := range recs {
 			infos = append(infos, AddressInfo{
-				Index:   rec.Index,
-				Address: rec.Address,
-				State:   rec.State,
+				Index:    rec.Index,
+				Address:  rec.Address,
+				State:    rec.State,
+				Reserved: rec.Reserved,
 			})
 		}
 	}
@@ -326,21 +339,37 @@ func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 // ─── Signing ──────────────────────────────────────────────────────────────────
 
 // SignMessage signs an arbitrary message using the key for fromAddr.
-// fromAddr must be in PENDING state (payment received, not yet confirmed).
+// fromAddr must be in FUNDED state.
 //
 // The message is hashed with the QOGE prefix before signing:
-//   hash = SHA256(SHA256("Qogecoin Signed Message:" || SHA256(message)))
+//
+//	hash = SHA256(SHA256("Qogecoin Signed Message:" || SHA256(message)))
 //
 // Returns the 32-byte public key and ~17 KB SLH-DSA signature.
 // The caller is responsible for broadcasting the transaction promptly —
 // the mempool window is ~60 seconds at 1-minute block time.
 func (w *Wallet) SignMessage(fromAddr string, message []byte) (pubKey, sig []byte, err error) {
+	w.signMu.Lock()
+	defer w.signMu.Unlock()
+	pubKey, sig, err = w.signMessage(fromAddr, message)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, ""); err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignMessage: finalize lifecycle: %w", err)
+	}
+	return pubKey, sig, nil
+}
+
+// signMessage performs the cryptographic operation without changing lifecycle
+// state. Transaction signing uses it before atomically reserving change.
+func (w *Wallet) signMessage(fromAddr string, message []byte) (pubKey, sig []byte, err error) {
 	rec, err := w.index.GetRecord(fromAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignMessage: address not found: %w", err)
 	}
-	if rec.State != keystore.StatePending {
-		return nil, nil, fmt.Errorf("wallet: SignMessage: address %s is %s (want PENDING)",
+	if rec.State != keystore.StateFunded {
+		return nil, nil, fmt.Errorf("wallet: SignMessage: address %s is %s (want FUNDED)",
 			fromAddr, rec.State)
 	}
 
@@ -376,13 +405,15 @@ func (w *Wallet) SignMessage(fromAddr string, message []byte) (pubKey, sig []byt
 // M2.1: Change routing enforcement — returns an error if tx.Change is not
 // a FRESH address in this wallet's index.
 func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error) {
+	w.signMu.Lock()
+	defer w.signMu.Unlock()
 	// M2.1: Enforce change routing to a FRESH address.
 	changeRec, err := w.index.GetRecord(tx.Change)
 	if err != nil {
 		return nil, fmt.Errorf("wallet: SignTransaction: change address not in index — "+
 			"change MUST route to a fresh wallet address: %w", err)
 	}
-	if changeRec.State != keystore.StateFresh {
+	if changeRec.State != keystore.StateFresh || changeRec.Reserved {
 		return nil, fmt.Errorf("wallet: SignTransaction: change address is %s (want FRESH) — "+
 			"INVARIANT VIOLATION: change must route to a new unused address", changeRec.State)
 	}
@@ -406,14 +437,13 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 	}
 
 	// Sign the transaction message hash.
-	pubKey, sig, err := w.SignMessage(tx.From, tx.MessageID)
+	pubKey, sig, err := w.signMessage(tx.From, tx.MessageID)
 	if err != nil {
 		return nil, err
 	}
 
-	// M2.1: transition change FRESH → PENDING only after signing succeeds.
-	if err := w.index.MarkPending(tx.Change); err != nil {
-		return nil, fmt.Errorf("wallet: SignTransaction: mark change PENDING: %w", err)
+	if err := w.index.MarkSpendPendingAndReserveChange(tx.From, tx.Change); err != nil {
+		return nil, fmt.Errorf("wallet: SignTransaction: finalize lifecycle: %w", err)
 	}
 
 	return &SignedTransaction{
@@ -554,8 +584,8 @@ type P2QPKSpendParams struct {
 	SpentUTXOs []SpentUTXO // parallel with Inputs; holds the UTXOs being consumed
 	Outputs    []SpendOutput
 	InputIndex uint32 // index of the input being signed
-	FromAddr   string // must be in PENDING state in the wallet index
-	ChangeAddr string // must be a FRESH wallet-controlled address; transitioned to PENDING after signing
+	FromAddr   string // must be in FUNDED state in the wallet index
+	ChangeAddr string // must be an unreserved FRESH wallet-controlled address
 }
 
 // p2qpkScriptPubKey derives the P2QPK scriptPubKey for addr.
@@ -576,12 +606,12 @@ func p2qpkScriptPubKey(addr string) ([]byte, error) {
 }
 
 // SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
-// params.FromAddr must be in PENDING state.
+// params.FromAddr must be in FUNDED state.
 //
 // Change handling (two cases):
 //   - params.ChangeAddr non-empty: must be a FRESH wallet-controlled address;
 //     exactly one entry in params.Outputs must encode its P2QPK scriptPubKey;
-//     it is transitioned FRESH→PENDING after a successful sign.
+//     it is reserved after a successful sign.
 //   - params.ChangeAddr == "": no change output; params.Outputs must contain
 //     exactly one output (the recipient). Use this when CalcChange returns 0
 //     (UTXO exactly covers send + fee). No change address is consumed.
@@ -590,12 +620,14 @@ func p2qpkScriptPubKey(addr string) ([]byte, error) {
 // The message signed is the 32-byte P2QPKSighash — NOT canonicalMessageHash,
 // which is only for the CLI generic message-signing demo (Open Item 4).
 func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, err error) {
+	w.signMu.Lock()
+	defer w.signMu.Unlock()
 	rec, err := w.index.GetRecord(params.FromAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address not found: %w", err)
 	}
-	if rec.State != keystore.StatePending {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want PENDING)",
+	if rec.State != keystore.StateFunded {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address %s is %s (want FUNDED)",
 			params.FromAddr, rec.State)
 	}
 
@@ -624,7 +656,7 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: change address not in wallet index — "+
 				"change MUST route to a fresh wallet address: %w", err)
 		}
-		if changeRec.State != keystore.StateFresh {
+		if changeRec.State != keystore.StateFresh || changeRec.Reserved {
 			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w (got %s)",
 				ErrChangeAddressNotFresh, changeRec.State)
 		}
@@ -678,12 +710,8 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sign: %w", err)
 	}
 
-	// M2.1: transition change FRESH → PENDING only after signing succeeds.
-	// Skip when ChangeAddr is empty (no-change tx — no address to transition).
-	if params.ChangeAddr != "" {
-		if err := w.index.MarkPending(params.ChangeAddr); err != nil {
-			return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: mark change PENDING: %w", err)
-		}
+	if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr); err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: finalize lifecycle: %w", err)
 	}
 
 	return rec.PublicKey, signature, nil

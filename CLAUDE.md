@@ -67,10 +67,19 @@ wallet/wallet.go     — Orchestration: wires signer + address + keystore, enfor
 ### Address lifecycle (enforced by keystore)
 
 ```
-FRESH → PENDING → SPENT → RETIRED (EncSeedBlob zeroed, permanent)
+FRESH → FUNDED → SPEND_PENDING → SPENT → RETIRED
 ```
 
-`keystore.transition()` is the sole state machine executor. Any skip or reversal returns a sentinel error (`ErrAddressAlreadyUsed`, etc.).
+FUNDED is auto-detected from a positive `scantxoutset` balance once every
+detected UTXO is at least `FundingMinConfirmations` (20) blocks deep. Signing
+atomically moves the source to SPEND_PENDING and reserves any FRESH change
+address. Reserved change is excluded from receive/change selection and becomes
+FUNDED once its confirmed balance reaches the same depth. Signing operations
+are serialized per wallet to prevent concurrent signatures from one source.
+
+The schema is versioned and deliberately has no migration from the former
+four-state database. Delete `qoge_wallet.db` and create a new wallet with a new
+seed; old records are rejected with `ErrIncompatibleDB`.
 
 **Flagging vs. key destruction are decoupled:**
 - `wallet.OnConfirmation(addr, confirmations)` — flags the address SPENT at confirmations ≥ 1 (prevents reuse). Does NOT destroy the private key. Also refills the pre-generation pool.
@@ -78,7 +87,7 @@ FRESH → PENDING → SPENT → RETIRED (EncSeedBlob zeroed, permanent)
 - `wallet.ListPurgeEligibleAddresses(confirmationsFor)` — advisory scan returning SPENT addresses above the threshold. Does not purge anything.
 - `keystore.MarkSpentAndRetire` has been removed — it was the Audit 5 atomicity fix for `OnConfirmation`, but `OnConfirmation` no longer performs key destruction (Audit 4 redesign), leaving the method with zero production callers and a footgun API (no confirmation-depth guard). The two-step `MarkSpent` + `Retire` path through `OnConfirmation` + `PurgeSpentKey` is the correct replacement.
 
-**Change-output enforcement:** `SignP2QPKInput` and `SignTransaction` both validate that the designated change address is FRESH and wallet-controlled before signing, then transition it to PENDING immediately after a successful sign. If signing fails for any reason, the change address is not transitioned. Additionally, `SignP2QPKInput` verifies that exactly one entry in `params.Outputs` has a script encoding the change address as a P2QPK scriptPubKey (`OP_2 PUSH32 <HASH256>`, 34 bytes) — signing is rejected if no output matches or multiple outputs match. `SignTransaction` applies the same binding check against `tx.Outputs`.
+**Change-output enforcement:** `SignP2QPKInput` and `SignTransaction` validate that the designated change address is unreserved, FRESH, and wallet-controlled. After signing, source transition and change reservation are committed atomically. If signing fails, neither lifecycle effect occurs. The output-binding checks remain unchanged.
 
 **FromAddr/SpentUTXO cross-check:** `SignP2QPKInput` validates that `params.SpentUTXOs[params.InputIndex].Script` matches the P2QPK scriptPubKey derived from `params.FromAddr` before signing (`ErrFromAddrScriptMismatch`). Without this check a caller supplying a mismatched UTXO script would produce a signature that is invalid on-chain while consuming the address's wallet state. Reuses the `p2qpkScriptPubKey()` helper. Resolves Audit 5 finding 3 (`4f80192`).
 

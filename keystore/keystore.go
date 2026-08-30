@@ -4,14 +4,16 @@
 //
 //   - Every SLH-DSA keypair is derived from a master seed via an index counter.
 //   - The index is monotonically incrementing and never decrements.
-//   - Each address has an immutable lifecycle: FRESH → PENDING → SPENT → RETIRED.
+//   - Each address has an immutable lifecycle:
+//     FRESH → FUNDED → SPEND_PENDING → SPENT → RETIRED.
 //   - Private key material is zeroed from memory on transition to RETIRED.
 //   - The index DB is persisted encrypted to disk (bbolt + AES-256-GCM).
 //
 // Security invariants (hard-coded, never configurable):
-//  1. No address transitions FRESH → PENDING twice.
+//  1. Only FUNDED addresses may sign, and they may enter SPEND_PENDING once.
 //  2. RETIRED is permanent. No address is ever un-retired.
-//  3. Change outputs always route to the next FRESH address.
+//  3. Change outputs route to an unreserved FRESH address, which is reserved
+//     atomically with the source's transition to SPEND_PENDING.
 //  4. The master seed never leaves this package unencrypted.
 package keystore
 
@@ -37,18 +39,21 @@ import (
 type AddressState uint8
 
 const (
-	StateFresh   AddressState = iota // Generated, not yet used
-	StatePending                     // Payment detected in mempool
-	StateSpent                       // Transaction confirmed (1 block)
-	StateRetired                     // Private key zeroed; permanent
+	StateFresh        AddressState = iota // Generated, unreserved, and unfunded
+	StateFunded                           // Confirmed balance; key never exposed
+	StateSpendPending                     // Successfully signed; awaiting confirmation
+	StateSpent                            // Spending transaction confirmed
+	StateRetired                          // Private key zeroed; permanent
 )
 
 func (s AddressState) String() string {
 	switch s {
 	case StateFresh:
 		return "FRESH"
-	case StatePending:
-		return "PENDING"
+	case StateFunded:
+		return "FUNDED"
+	case StateSpendPending:
+		return "SPEND_PENDING"
 	case StateSpent:
 		return "SPENT"
 	case StateRetired:
@@ -61,12 +66,14 @@ func (s AddressState) String() string {
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 var (
-	ErrAddressAlreadyUsed  = errors.New("keystore: INVARIANT VIOLATION — address already transitioned from FRESH")
-	ErrAddressNotPending   = errors.New("keystore: cannot mark spent — address is not PENDING")
+	ErrAddressNotFresh     = errors.New("keystore: address is not an unreserved FRESH address")
+	ErrAddressNotFunded    = errors.New("keystore: address is not FUNDED")
+	ErrAddressNotPending   = errors.New("keystore: cannot mark spent — address is not SPEND_PENDING")
 	ErrAddressNotSpent     = errors.New("keystore: cannot retire — address is not SPENT")
 	ErrNoFreshAddress      = errors.New("keystore: no FRESH address available — call PreGenerate first")
 	ErrMasterSeedNotLoaded = errors.New("keystore: master seed not loaded — call Open first")
 	ErrInvalidSeedLength   = errors.New("keystore: invalid seed length (want 32 bytes)")
+	ErrIncompatibleDB      = errors.New("keystore: incompatible pre-five-state database; delete qoge_wallet.db and create a new wallet with a new seed")
 )
 
 // ─── AddressRecord ────────────────────────────────────────────────────────────
@@ -80,6 +87,7 @@ type AddressRecord struct {
 	PublicKey   []byte       `json:"public_key"` // 32-byte SLH-DSA pubkey
 	EncSeedBlob []byte       `json:"enc_seed"`   // AES-256-GCM encrypted seed (nil after retirement)
 	State       AddressState `json:"state"`
+	Reserved    bool         `json:"reserved,omitempty"` // FRESH change output committed by a signed transaction
 }
 
 // ─── DB bucket names ─────────────────────────────────────────────────────────
@@ -88,6 +96,10 @@ var (
 	bucketAddresses = []byte("addresses") // index (uint64 big-endian) → AddressRecord JSON
 	bucketMeta      = []byte("meta")      // "next_index" → uint64; "master_salt" → []byte
 )
+
+const schemaVersion = uint64(2)
+
+var keySchemaVersion = []byte("schema_version")
 
 // ─── KeyIndex ─────────────────────────────────────────────────────────────────
 
@@ -112,17 +124,32 @@ func Open(dbPath string, seed []byte) (*KeyIndex, error) {
 		return nil, fmt.Errorf("keystore: open DB: %w", err)
 	}
 
-	// Initialise buckets if first run.
+	// Initialise buckets and reject old records rather than interpreting their
+	// numeric state values under the new five-state lifecycle.
 	if err := db.Update(func(tx *bolt.Tx) error {
 		for _, bkt := range [][]byte{bucketAddresses, bucketMeta} {
 			if _, err := tx.CreateBucketIfNotExists(bkt); err != nil {
 				return err
 			}
 		}
+		meta := tx.Bucket(bucketMeta)
+		addresses := tx.Bucket(bucketAddresses)
+		version := meta.Get(keySchemaVersion)
+		if version == nil {
+			if k, _ := addresses.Cursor().First(); k != nil {
+				return ErrIncompatibleDB
+			}
+			buf := make([]byte, 8)
+			binary.BigEndian.PutUint64(buf, schemaVersion)
+			return meta.Put(keySchemaVersion, buf)
+		}
+		if len(version) != 8 || binary.BigEndian.Uint64(version) != schemaVersion {
+			return ErrIncompatibleDB
+		}
 		return nil
 	}); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("keystore: init buckets: %w", err)
+		return nil, fmt.Errorf("keystore: init/validate database: %w", err)
 	}
 
 	// Derive AES key from master seed using HKDF-SHA256.
@@ -230,10 +257,10 @@ func (ki *KeyIndex) GenerateAddress(deriveFn func([]byte, uint64) ([]byte, []byt
 	return addr, err
 }
 
-// PreGenerate generates N fresh addresses if the pool has fewer than N FRESH entries.
+// PreGenerate generates addresses until the pool has N unreserved FRESH entries.
 // Calls GenerateAddress N times as needed.
 func (ki *KeyIndex) PreGenerate(n int, deriveFn func([]byte, uint64) ([]byte, []byte, string, error)) error {
-	current, err := ki.CountByState(StateFresh)
+	current, err := ki.CountAvailableFresh()
 	if err != nil {
 		return err
 	}
@@ -248,15 +275,67 @@ func (ki *KeyIndex) PreGenerate(n int, deriveFn func([]byte, uint64) ([]byte, []
 
 // ─── State transitions ────────────────────────────────────────────────────────
 
-// MarkPending transitions address addr from FRESH → PENDING.
-// Returns ErrAddressAlreadyUsed if the address is not FRESH (invariant 1).
-func (ki *KeyIndex) MarkPending(addr string) error {
-	return ki.transition(addr, StateFresh, StatePending, false)
+// MarkFunded transitions an address from FRESH → FUNDED after the wallet
+// observes a positive balance at the required confirmation depth. A reserved
+// change address is valid here; reservation is cleared as it becomes spendable.
+func (ki *KeyIndex) MarkFunded(addr string) error {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	return ki.db.Update(func(tx *bolt.Tx) error {
+		rec, key, err := findRecord(tx, addr)
+		if err != nil {
+			return err
+		}
+		if rec.State != StateFresh {
+			return ErrAddressNotFresh
+		}
+		rec.State = StateFunded
+		rec.Reserved = false
+		return putRecord(tx, key, rec)
+	})
 }
 
-// MarkSpent transitions address addr from PENDING → SPENT (on 1 confirmation).
+// MarkSpendPendingAndReserveChange atomically transitions the signing source
+// FUNDED → SPEND_PENDING and optionally reserves a FRESH change address.
+func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr string) error {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	return ki.db.Update(func(tx *bolt.Tx) error {
+		from, fromKey, err := findRecord(tx, fromAddr)
+		if err != nil {
+			return err
+		}
+		if from.State != StateFunded {
+			return ErrAddressNotFunded
+		}
+		var change *AddressRecord
+		var changeKey []byte
+		if changeAddr != "" {
+			change, changeKey, err = findRecord(tx, changeAddr)
+			if err != nil {
+				return err
+			}
+			if change.State != StateFresh || change.Reserved {
+				return ErrAddressNotFresh
+			}
+		}
+		from.State = StateSpendPending
+		if err := putRecord(tx, fromKey, from); err != nil {
+			return err
+		}
+		if change != nil {
+			change.Reserved = true
+			if err := putRecord(tx, changeKey, change); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// MarkSpent transitions address addr from SPEND_PENDING → SPENT.
 func (ki *KeyIndex) MarkSpent(addr string) error {
-	return ki.transition(addr, StatePending, StateSpent, false)
+	return ki.transition(addr, StateSpendPending, StateSpent, false)
 }
 
 // Retire transitions address addr from SPENT → RETIRED and zeros the
@@ -280,8 +359,10 @@ func (ki *KeyIndex) transition(addr string, from, to AddressState, zeroSeed bool
 		if rec.State != from {
 			switch from {
 			case StateFresh:
-				return ErrAddressAlreadyUsed
-			case StatePending:
+				return ErrAddressNotFresh
+			case StateFunded:
+				return ErrAddressNotFunded
+			case StateSpendPending:
 				return ErrAddressNotPending
 			case StateSpent:
 				return ErrAddressNotSpent
@@ -292,17 +373,13 @@ func (ki *KeyIndex) transition(addr string, from, to AddressState, zeroSeed bool
 			ZeroBytes(rec.EncSeedBlob)
 			rec.EncSeedBlob = nil
 		}
-		data, err := json.Marshal(rec)
-		if err != nil {
-			return err
-		}
-		return tx.Bucket(bucketAddresses).Put(key, data)
+		return putRecord(tx, key, rec)
 	})
 }
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
-// NextFreshAddress returns the address string of the lowest-index FRESH record.
+// NextFreshAddress returns the lowest-index unreserved FRESH address.
 // Returns ErrNoFreshAddress if the pool is empty.
 func (ki *KeyIndex) NextFreshAddress() (string, error) {
 	ki.mu.Lock()
@@ -316,7 +393,7 @@ func (ki *KeyIndex) NextFreshAddress() (string, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			if rec.State == StateFresh {
+			if rec.State == StateFresh && !rec.Reserved {
 				addr = rec.Address
 				return nil
 			}
@@ -377,6 +454,26 @@ func (ki *KeyIndex) CountByState(state AddressState) (int, error) {
 				return err
 			}
 			if rec.State == state {
+				count++
+			}
+			return nil
+		})
+	})
+	return count, err
+}
+
+// CountAvailableFresh counts FRESH records which are not reserved for change.
+func (ki *KeyIndex) CountAvailableFresh() (int, error) {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	count := 0
+	err := ki.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAddresses).ForEach(func(_, v []byte) error {
+			var rec AddressRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.State == StateFresh && !rec.Reserved {
 				count++
 			}
 			return nil
@@ -471,6 +568,14 @@ func findRecord(tx *bolt.Tx, addr string) (*AddressRecord, []byte, error) {
 		return nil, nil, err
 	}
 	return nil, nil, fmt.Errorf("keystore: address not found: %s", addr)
+}
+
+func putRecord(tx *bolt.Tx, key []byte, rec *AddressRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return tx.Bucket(bucketAddresses).Put(key, data)
 }
 
 // hkdfDerive derives keyLen bytes from seed using HKDF-SHA256 with info.

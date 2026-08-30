@@ -5,7 +5,7 @@
 // Key differences from the reference repo:
 //   - Algorithm: SLH-DSA-SHA2-128f (FIPS 205) instead of SPHINCS+-SHA2-128s-simple (Round 3)
 //   - Address: HASH256 + Bech32("qoge") instead of ethereum crypto.Keccak256
-//   - Key lifecycle: single-use HD index with state machine (FRESH→PENDING→SPENT→RETIRED)
+//   - Key lifecycle: FRESH→FUNDED→SPEND_PENDING→SPENT→RETIRED
 //   - Taproot: not present (M1.7 — removed at compile time, not a menu option)
 //   - Key storage: encrypted bbolt index instead of plaintext keypair.json
 //   - Key destruction: on confirmation callback, not on process exit
@@ -106,12 +106,11 @@ mainMenu:
 		fmt.Println()
 		fmt.Println("── QOGE Wallet ────────────────────────────────────")
 		fmt.Println("  1. Get next receive address")
-		fmt.Println("  2. Mark payment received (FRESH → PENDING)")
-		fmt.Println("  3. Sign message")
-		fmt.Println("  4. Simulate confirmation (PENDING → SPENT, flags address used)")
-		fmt.Println("  5. List addresses eligible for key purging")
-		fmt.Println("  6. Purge key for a SPENT address (PERMANENT — cannot be undone)")
-		fmt.Println("  7. Exit")
+		fmt.Println("  2. Sign message (FUNDED address)")
+		fmt.Println("  3. Simulate spend confirmation (SPEND_PENDING → SPENT)")
+		fmt.Println("  4. List addresses eligible for key purging")
+		fmt.Println("  5. Purge key for a SPENT address (PERMANENT — cannot be undone)")
+		fmt.Println("  6. Exit")
 		choice := promptChoice()
 
 		switch choice {
@@ -125,16 +124,7 @@ mainMenu:
 			fmt.Println("  Share this address exactly once. Never reuse it.")
 
 		case "2":
-			fmt.Print("  Enter address to mark as PENDING: ")
-			addr := strings.TrimSpace(prompt())
-			if err := w.MarkPaymentReceived(addr); err != nil {
-				fmt.Printf("  ✗ Error: %v\n", err)
-				continue
-			}
-			fmt.Println("  ✓ Address marked PENDING.")
-
-		case "3":
-			fmt.Print("  Enter address to sign from (must be PENDING): ")
+			fmt.Print("  Enter address to sign from (must be FUNDED): ")
 			addr := strings.TrimSpace(prompt())
 			fmt.Print("  Enter message to sign: ")
 			msg := strings.TrimSpace(prompt())
@@ -157,10 +147,10 @@ mainMenu:
 				fmt.Println("  ✓ Self-verification passed.")
 			}
 
-		case "4":
+		case "3":
 			// Simulates the QOGE chain calling OnConfirmation after a spend tx confirms.
 			// Flags the address SPENT (prevents reuse) — does NOT destroy the private key.
-			// Use option 6 to destroy the key when ready.
+			// Use option 5 to destroy the key when ready.
 			fmt.Print("  Enter address to confirm (flags SPENT, no key destruction): ")
 			addr := strings.TrimSpace(prompt())
 			if err := w.OnConfirmation(addr, 1); err != nil {
@@ -169,9 +159,9 @@ mainMenu:
 			}
 			fmt.Println("  ✓ Address flagged SPENT. Private key still present.")
 			fmt.Println("    Address pool refilled with fresh pre-generated addresses.")
-			fmt.Println("    Use option 5 to check eligibility and option 6 to purge the key.")
+			fmt.Println("    Use option 4 to check eligibility and option 5 to purge the key.")
 
-		case "5":
+		case "4":
 			// Advisory scan — shows SPENT addresses eligible for key destruction.
 			// Does not purge anything.
 			eligible, err := w.ListPurgeEligibleAddresses(func(_ string) int {
@@ -188,13 +178,13 @@ mainMenu:
 				fmt.Println("  No SPENT addresses have reached the purge eligibility threshold yet.")
 			} else {
 				fmt.Printf("\n  The following %d address(es) are SPENT and eligible for key purging.\n", len(eligible))
-				fmt.Printf("  Use option 6 to purge any of them. This cannot be undone.\n\n")
+				fmt.Printf("  Use option 5 to purge any of them. This cannot be undone.\n\n")
 				for i, e := range eligible {
 					fmt.Printf("    [%d] %s  (%d confirmations)\n", i+1, e.Address, e.Confirmations)
 				}
 			}
 
-		case "6":
+		case "5":
 			// Permanently destroys the private key for a SPENT address.
 			// This action is IRREVERSIBLE and optional — the wallet works normally
 			// without ever purging keys.
@@ -217,7 +207,7 @@ mainMenu:
 			fmt.Println("    compaction or secure erasure of the database file.")
 			fmt.Println("    This purge cannot be undone.")
 
-		case "7":
+		case "6":
 			fmt.Println("  Closing wallet (zeroing sensitive memory)...")
 			os.Exit(0)
 
