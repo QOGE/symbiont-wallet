@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -27,6 +29,73 @@ import (
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	"github.com/saogen/qoge-sphincs-wallet/wallet"
 )
+
+const (
+	localMainnetRPCEndpoint = "127.0.0.1:8332"
+	localRPCProbeTimeout    = 2 * time.Second
+	rpcCookieUsername       = "__cookie__"
+)
+
+type rpcCookie struct {
+	username string
+	password string
+}
+
+// defaultRPCCookiePath is Qogecoin's standard mainnet cookie location.
+// Nodes using a custom datadir or -rpccookiefile remain available through the
+// manual connection controls.
+func defaultRPCCookiePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".qogecoin", ".cookie")
+}
+
+// readRPCCookie reads the exact credential format emitted by qogecoind:
+// __cookie__:<64 hex characters>. A missing file is an ordinary, silent miss.
+func readRPCCookie(path string) (rpcCookie, bool, error) {
+	if path == "" {
+		return rpcCookie{}, false, nil
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return rpcCookie{}, false, nil
+	}
+	if err != nil {
+		return rpcCookie{}, false, fmt.Errorf("read RPC cookie: %w", err)
+	}
+
+	value := strings.TrimSuffix(string(raw), "\n")
+	value = strings.TrimSuffix(value, "\r")
+	user, password, ok := strings.Cut(value, ":")
+	if !ok || user != rpcCookieUsername || len(password) != 64 {
+		return rpcCookie{}, false, fmt.Errorf("invalid RPC cookie format")
+	}
+	decoded, err := hex.DecodeString(password)
+	if err != nil || len(decoded) != 32 {
+		return rpcCookie{}, false, fmt.Errorf("invalid RPC cookie password")
+	}
+	keystore.ZeroBytes(decoded)
+	return rpcCookie{username: user, password: password}, true, nil
+}
+
+type localRPCConnector func(endpoint, username, password string) (*rpcclient.Client, error)
+
+// tryLocalRPCConnection preserves current on every miss or failure. Automatic
+// discovery is deliberately silent; only a successful connection is reported
+// to the GUI by the caller.
+func tryLocalRPCConnection(cookiePath string, current *rpcclient.Client, connect localRPCConnector) (*rpcclient.Client, bool) {
+	cookie, found, err := readRPCCookie(cookiePath)
+	if err != nil || !found {
+		return current, false
+	}
+	candidate, err := connect(localMainnetRPCEndpoint, cookie.username, cookie.password)
+	if err != nil {
+		return current, false
+	}
+	return candidate, true
+}
 
 // walletDBPath returns the absolute path to the wallet database.
 // Using os.UserHomeDir() prevents silent mismatches when the GUI is
@@ -90,6 +159,7 @@ func main() {
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
 	var addressesTab, sendTab *container.TabItem
+	var rpcStatusLabel *widget.Label
 
 	// ── Receive tab ────────────────────────────────────────────────────────
 
@@ -184,6 +254,20 @@ func main() {
 			status.SetText("New wallet created.")
 		} else {
 			status.SetText("Existing wallet opened.")
+		}
+
+		var connected bool
+		rpc, connected = tryLocalRPCConnection(defaultRPCCookiePath(), rpc, func(endpoint, username, password string) (*rpcclient.Client, error) {
+			candidate := rpcclient.New(endpoint, username, password)
+			ctx, cancel := context.WithTimeout(context.Background(), localRPCProbeTimeout)
+			defer cancel()
+			if err := candidate.Ping(ctx); err != nil {
+				return nil, err
+			}
+			return candidate, nil
+		})
+		if connected && rpcStatusLabel != nil {
+			rpcStatusLabel.SetText("Connected to local node")
 		}
 	}
 
@@ -355,7 +439,7 @@ func main() {
 	rpcPass := widget.NewPasswordEntry()
 	rpcPass.SetPlaceHolder("RPC password")
 
-	rpcStatusLabel := widget.NewLabel("No node connected — balances will not be shown.")
+	rpcStatusLabel = widget.NewLabel("No node connected — balances will not be shown.")
 	rpcStatusLabel.Wrapping = fyne.TextWrapWord
 
 	connectBtn := widget.NewButton("Connect to Node", func() {

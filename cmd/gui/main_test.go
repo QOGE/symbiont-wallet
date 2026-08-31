@@ -2,15 +2,80 @@ package main
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	fynetest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/saogen/qoge-sphincs-wallet/internal/rpcclient"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	"github.com/saogen/qoge-sphincs-wallet/wallet"
 )
+
+func TestReadRPCCookie(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".cookie")
+	wantPassword := strings.Repeat("a5", 32)
+	if err := os.WriteFile(path, []byte(rpcCookieUsername+":"+wantPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie, found, err := readRPCCookie(path)
+	if err != nil {
+		t.Fatalf("readRPCCookie: %v", err)
+	}
+	if !found {
+		t.Fatal("readRPCCookie reported a valid synthetic cookie missing")
+	}
+	if cookie.username != rpcCookieUsername || cookie.password != wantPassword {
+		t.Fatalf("cookie = {%q, %q}, want {%q, %q}", cookie.username, cookie.password, rpcCookieUsername, wantPassword)
+	}
+}
+
+func TestReadRPCCookieRejectsMalformedContents(t *testing.T) {
+	for name, contents := range map[string]string{
+		"wrong username": "user:" + strings.Repeat("a5", 32),
+		"short password": rpcCookieUsername + ":a5",
+		"non-hex":        rpcCookieUsername + ":" + strings.Repeat("zz", 32),
+		"missing colon":  rpcCookieUsername + strings.Repeat("a5", 32),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".cookie")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, found, err := readRPCCookie(path); err == nil || found {
+				t.Fatalf("readRPCCookie malformed result: found=%v err=%v, want false/error", found, err)
+			}
+		})
+	}
+}
+
+func TestMissingRPCCookieLeavesConnectionUnchanged(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), ".cookie")
+	if _, found, err := readRPCCookie(missingPath); err != nil || found {
+		t.Fatalf("missing cookie: found=%v err=%v, want false/nil", found, err)
+	}
+
+	existing := rpcclient.New("remote.example:1234", "user", "password")
+	connectCalled := false
+	got, connected := tryLocalRPCConnection(missingPath, existing,
+		func(endpoint, username, password string) (*rpcclient.Client, error) {
+			connectCalled = true
+			return rpcclient.New(endpoint, username, password), nil
+		})
+	if connected {
+		t.Fatal("missing cookie reported an automatic connection")
+	}
+	if connectCalled {
+		t.Fatal("connector called for a missing cookie")
+	}
+	if got != existing {
+		t.Fatal("missing cookie changed the existing connection")
+	}
+}
 
 func TestGenerateSeedHexProducesRandom32ByteSeeds(t *testing.T) {
 	first, err := generateSeedHex()
