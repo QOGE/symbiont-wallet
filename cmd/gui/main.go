@@ -82,6 +82,18 @@ func readRPCCookie(path string) (rpcCookie, bool, error) {
 
 type localRPCConnector func(endpoint, username, password string) (*rpcclient.Client, error)
 
+func updateRPCStatus(label *widget.Label, endpoint string, err error) {
+	if err != nil {
+		label.SetText(fmt.Sprintf("Not connected — %v", err))
+		return
+	}
+	if endpoint == "" {
+		label.SetText("Not connected")
+		return
+	}
+	label.SetText(fmt.Sprintf("Connected to %s", endpoint))
+}
+
 // tryLocalRPCConnection preserves current on every miss or failure. Automatic
 // discovery is deliberately silent; only a successful connection is reported
 // to the GUI by the caller.
@@ -150,6 +162,14 @@ func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired bool) (visi
 	return visible, hidden
 }
 
+func newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab *container.TabItem) *container.AppTabs {
+	tabs := container.NewAppTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	tabs.DisableItem(receiveTab)
+	tabs.DisableItem(addressesTab)
+	tabs.DisableItem(sendTab)
+	return tabs
+}
+
 func main() {
 	a := app.NewWithID("io.qoge.symbiont-wallet")
 	w := a.NewWindow("Symbiont Wallet")
@@ -158,13 +178,13 @@ func main() {
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
-	var addressesTab, sendTab *container.TabItem
-	var rpcStatusLabel *widget.Label
+	var receiveTab, addressesTab, sendTab *container.TabItem
+	var rpcFooterStatus *widget.Label
 
-	// ── Receive tab ────────────────────────────────────────────────────────
+	// ── Wallet and Receive tabs ────────────────────────────────────────────────────────
 
-	status := widget.NewLabel("No wallet open.")
-	status.Wrapping = fyne.TextWrapWord
+	walletStatus := widget.NewLabel("No wallet open.")
+	walletStatus.Wrapping = fyne.TextWrapWord
 
 	addrDisplay := widget.NewEntry()
 	addrDisplay.Disable()
@@ -187,7 +207,7 @@ func main() {
 	copySeedBtn := widget.NewButton("Copy Generated Seed", func() {
 		if generatedSeedDisplay.Text != "" {
 			w.Clipboard().SetContent(generatedSeedDisplay.Text)
-			status.SetText("Generated seed copied. Save it securely before creating the wallet.")
+			walletStatus.SetText("Generated seed copied. Save it securely before creating the wallet.")
 		}
 	})
 	backupPanel := container.NewVBox(
@@ -216,7 +236,7 @@ func main() {
 		generatedSeedDisplay.SetText(seedHex)
 		seedSavedCheck.SetChecked(false)
 		backupPanel.Show()
-		status.SetText("New seed generated. Save the displayed seed and acknowledge the backup before creating the wallet.")
+		walletStatus.SetText("New seed generated. Save the displayed seed and acknowledge the backup before creating the wallet.")
 	})
 
 	loadWallet := func(create bool) {
@@ -247,13 +267,14 @@ func main() {
 		}
 		wlt = newWallet
 		if tabs != nil {
+			tabs.EnableItem(receiveTab)
 			tabs.EnableItem(addressesTab)
 			tabs.EnableItem(sendTab)
 		}
 		if create {
-			status.SetText("New wallet created.")
+			walletStatus.SetText("New wallet created.")
 		} else {
-			status.SetText("Existing wallet opened.")
+			walletStatus.SetText("Existing wallet opened.")
 		}
 
 		var connected bool
@@ -266,8 +287,8 @@ func main() {
 			}
 			return candidate, nil
 		})
-		if connected && rpcStatusLabel != nil {
-			rpcStatusLabel.SetText("Connected to local node")
+		if connected && rpcFooterStatus != nil {
+			updateRPCStatus(rpcFooterStatus, localMainnetRPCEndpoint, nil)
 		}
 	}
 
@@ -289,7 +310,6 @@ func main() {
 			return
 		}
 		addrDisplay.SetText(addr)
-		status.SetText("New address generated — share this to receive funds.")
 	})
 
 	concentrationWarning := widget.NewLabel(
@@ -306,10 +326,9 @@ func main() {
 			return
 		}
 		w.Clipboard().SetContent(addr)
-		status.SetText("Address copied to clipboard.")
 	})
 
-	receiveTab := container.NewTabItem("Receive",
+	walletTab := container.NewTabItem("Wallet",
 		container.NewVBox(
 			widget.NewLabel("Seed (hex, 64 chars):"),
 			seedEntry,
@@ -319,14 +338,18 @@ func main() {
 			openBtn,
 			createBtn,
 			widget.NewSeparator(),
+			walletStatus,
+		),
+	)
+
+	receiveTab = container.NewTabItem("Receive",
+		container.NewVBox(
 			newAddrBtn,
 			widget.NewLabel("Your P2QPK address:"),
 			addrDisplay,
 			copyAddrBtn,
 			widget.NewSeparator(),
 			concentrationWarning,
-			widget.NewSeparator(),
-			status,
 		),
 	)
 
@@ -439,27 +462,38 @@ func main() {
 	rpcPass := widget.NewPasswordEntry()
 	rpcPass.SetPlaceHolder("RPC password")
 
-	rpcStatusLabel = widget.NewLabel("No node connected — balances will not be shown.")
-	rpcStatusLabel.Wrapping = fyne.TextWrapWord
+	rpcFooterStatus = widget.NewLabel("Not connected")
+	rpcFooterStatus.Wrapping = fyne.TextWrapWord
 
 	connectBtn := widget.NewButton("Connect to Node", func() {
 		ep := rpcEndpoint.Text
 		user := rpcUser.Text
 		pass := rpcPass.Text
 		if ep == "" {
-			rpcStatusLabel.SetText("No endpoint entered — leave blank to skip balance lookup.")
 			rpc = nil
+			updateRPCStatus(rpcFooterStatus, "", nil)
 			return
 		}
 		c := rpcclient.New(ep, user, pass)
 		if err := c.Ping(context.Background()); err != nil {
-			rpcStatusLabel.SetText(fmt.Sprintf("Node unreachable: %v", err))
 			rpc = nil
+			updateRPCStatus(rpcFooterStatus, "", fmt.Errorf("node unreachable: %w", err))
 			return
 		}
 		rpc = c
-		rpcStatusLabel.SetText(fmt.Sprintf("Connected to %s", ep))
+		updateRPCStatus(rpcFooterStatus, ep, nil)
 	})
+
+	networkTab := container.NewTabItem("Network",
+		container.NewVBox(
+			widget.NewLabel("Node RPC connection:"),
+			rpcEndpoint,
+			rpcUser,
+			rpcPass,
+			connectBtn,
+			widget.NewLabel("Local cookie authentication is attempted automatically when a wallet is opened or created."),
+		),
+	)
 
 	refreshBtn := widget.NewButton("Refresh", func() {
 		if wlt == nil {
@@ -592,13 +626,6 @@ func main() {
 
 	addressesTab = container.NewTabItem("Addresses",
 		container.NewVBox(
-			widget.NewLabel("Node RPC (optional — leave blank for state-only view):"),
-			rpcEndpoint,
-			rpcUser,
-			rpcPass,
-			connectBtn,
-			rpcStatusLabel,
-			widget.NewSeparator(),
 			refreshBtn,
 			showSpentRetiredCheck,
 			addrListScroll,
@@ -969,10 +996,9 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs = container.NewAppTabs(receiveTab, addressesTab, sendTab)
-	tabs.DisableItem(addressesTab)
-	tabs.DisableItem(sendTab)
-	w.SetContent(tabs)
+	tabs = newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	footer := container.NewVBox(widget.NewSeparator(), rpcFooterStatus)
+	w.SetContent(container.NewBorder(nil, footer, nil, nil, tabs))
 
 	w.SetCloseIntercept(func() {
 		if wlt != nil {

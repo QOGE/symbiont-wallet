@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	fynetest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -74,6 +77,93 @@ func TestMissingRPCCookieLeavesConnectionUnchanged(t *testing.T) {
 	}
 	if got != existing {
 		t.Fatal("missing cookie changed the existing connection")
+	}
+}
+
+func TestRPCFooterStatusUpdates(t *testing.T) {
+	status := widget.NewLabel("initial")
+
+	updateRPCStatus(status, "remote.example:18332", nil)
+	if status.Text != "Connected to remote.example:18332" {
+		t.Fatalf("successful connect status = %q", status.Text)
+	}
+
+	updateRPCStatus(status, "", errors.New("node unreachable"))
+	if status.Text != "Not connected — node unreachable" {
+		t.Fatalf("failed connect status = %q", status.Text)
+	}
+
+	path := filepath.Join(t.TempDir(), ".cookie")
+	if err := os.WriteFile(path, []byte(rpcCookieUsername+":"+strings.Repeat("a5", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var current *rpcclient.Client
+	current, connected := tryLocalRPCConnection(path, current,
+		func(endpoint, username, password string) (*rpcclient.Client, error) {
+			return rpcclient.New(endpoint, username, password), nil
+		})
+	if !connected || current == nil {
+		t.Fatal("synthetic auto-connect did not succeed")
+	}
+	updateRPCStatus(status, localMainnetRPCEndpoint, nil)
+	if status.Text != "Connected to 127.0.0.1:8332" {
+		t.Fatalf("auto-connect status = %q", status.Text)
+	}
+}
+
+func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
+	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
+	receiveTab := container.NewTabItem("Receive", widget.NewLabel("receive"))
+	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
+	addressesTab := container.NewTabItem("Addresses", widget.NewLabel("addresses"))
+	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
+
+	tabs := newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	wantOrder := []string{"Wallet", "Receive", "Network", "Addresses", "Send"}
+	if len(tabs.Items) != len(wantOrder) {
+		t.Fatalf("tab count = %d, want %d", len(tabs.Items), len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if tabs.Items[i].Text != want {
+			t.Fatalf("tab %d = %q, want %q", i, tabs.Items[i].Text, want)
+		}
+	}
+	if walletTab.Disabled() || networkTab.Disabled() {
+		t.Fatal("Wallet and Network must be available before a wallet is loaded")
+	}
+	for _, item := range []*container.TabItem{receiveTab, addressesTab, sendTab} {
+		if !item.Disabled() {
+			t.Fatalf("%s tab enabled before wallet load", item.Text)
+		}
+		tabs.EnableItem(item)
+		if item.Disabled() {
+			t.Fatalf("%s tab remained disabled after wallet load", item.Text)
+		}
+	}
+}
+
+func TestMainTabsHeadlessClickGating(t *testing.T) {
+	fynetest.NewApp()
+	defer fynetest.NewApp()
+
+	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
+	receiveTab := container.NewTabItem("Receive", widget.NewLabel("receive"))
+	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
+	addressesTab := container.NewTabItem("Addresses", widget.NewLabel("addresses"))
+	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
+	tabs := newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	w := fynetest.NewWindow(tabs)
+	defer w.Close()
+	w.SetPadded(false)
+	w.Resize(fyne.NewSize(620, 120))
+
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(110, 10))
+	if tabs.Selected() != walletTab {
+		t.Fatalf("clicking disabled Receive selected %q, want Wallet", tabs.Selected().Text)
+	}
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(205, 10))
+	if tabs.Selected() != networkTab {
+		t.Fatalf("clicking enabled Network selected %q, want Network", tabs.Selected().Text)
 	}
 }
 
