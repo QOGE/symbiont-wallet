@@ -396,7 +396,7 @@ func main() {
 
 	addrListBox := container.NewVBox()
 	addrListScroll := container.NewVScroll(addrListBox)
-	addrListScroll.SetMinSize(fyne.NewSize(0, 220))
+	addrListScroll.SetMinSize(fyne.NewSize(0, 330))
 
 	addrStatusLabel := widget.NewLabel("Open a wallet, then press Refresh.")
 	addrStatusLabel.Wrapping = fyne.TextWrapWord
