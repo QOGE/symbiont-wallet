@@ -382,10 +382,10 @@ func main() {
 		container.NewVBox(
 			widget.NewLabel("Seed (hex, 64 chars):"),
 			seedEntry,
-			generateBtn,
+			openBtn,
 			backupPanel,
 			seedSavedCheck,
-			openBtn,
+			generateBtn,
 			createBtn,
 			widget.NewSeparator(),
 			walletStatus,
