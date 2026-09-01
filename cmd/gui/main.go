@@ -694,12 +694,10 @@ func main() {
 	// reaches one on-chain confirmation.
 
 	sendFromSelect := widget.NewSelect(nil, nil)
-	sendFromSelect.PlaceHolder = "(no FUNDED addresses — refresh after 20 confirmations)"
 
 	sendToSelect := widget.NewSelect(nil, nil)
-	sendToSelect.PlaceHolder = "(no FRESH addresses)"
 
-	internalToLabel := widget.NewLabel("Wallet-owned To address (FRESH):")
+	internalToLabel := widget.NewLabel("Wallet-owned To address (FRESH)")
 	externalToLabel := widget.NewLabel("External mainnet address:")
 	externalToEntry := widget.NewEntry()
 	externalToEntry.SetPlaceHolder("P2PKH, P2SH, P2WPKH, P2WSH, P2TR, or P2QPK")
@@ -859,14 +857,12 @@ func main() {
 		}
 		sendFromSelect.Options = funded
 		if len(funded) == 0 {
-			sendFromSelect.PlaceHolder = "(no FUNDED addresses — refresh after 20 confirmations)"
 			sendFromSelect.Selected = ""
 		}
 		sendFromSelect.Refresh()
 
 		sendToSelect.Options = fresh
 		if len(fresh) == 0 {
-			sendToSelect.PlaceHolder = "(no FRESH addresses)"
 			sendToSelect.Selected = ""
 		}
 		sendToSelect.Refresh()
@@ -1119,7 +1115,7 @@ func main() {
 		container.NewVBox(
 			refreshSendBtn,
 			widget.NewSeparator(),
-			widget.NewLabel("From address (FUNDED — confirmed and spendable):"),
+			widget.NewLabel("From address: (FUNDED - spendable after 20 confirmations)"),
 			sendFromSelect,
 			widget.NewLabel("Destination mode:"),
 			recipientMode,
