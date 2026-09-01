@@ -1,9 +1,7 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
-// Five tabs: Wallet lifecycle, Receive address generation, Network RPC setup,
-// Addresses/state tracking, and Send transaction construction.
-//
-//	broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
+// Four tabs: Wallet lifecycle, My Addresses generation/state tracking, Send
+// transaction construction, and Network RPC setup.
 package main
 
 import (
@@ -188,9 +186,36 @@ func resolveSendDestination(external bool, walletAddress, externalAddress string
 	return addr, destination, nil
 }
 
-func newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab *container.TabItem) *container.AppTabs {
-	tabs := container.NewAppTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
-	tabs.DisableItem(receiveTab)
+type broadcastGate struct {
+	approvedHex string
+}
+
+func (g *broadcastGate) Reset(button *widget.Button) {
+	g.approvedHex = ""
+	button.Disable()
+}
+
+func (g *broadcastGate) RecordMempoolResult(rawHex string, allowed bool, button *widget.Button) {
+	g.Reset(button)
+	if allowed && rawHex != "" {
+		g.approvedHex = rawHex
+		button.Enable()
+	}
+}
+
+func (g *broadcastGate) Allows(rawHex string) bool {
+	return rawHex != "" && g.approvedHex == rawHex
+}
+
+type signedBroadcastContext struct {
+	rawHex          string
+	destination     string
+	destinationType qogeaddress.DestinationType
+	amountSats      int64
+}
+
+func newMainTabs(walletTab, addressesTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
+	tabs := container.NewAppTabs(walletTab, addressesTab, sendTab, networkTab)
 	tabs.DisableItem(addressesTab)
 	tabs.DisableItem(sendTab)
 	return tabs
@@ -204,7 +229,7 @@ func main() {
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
-	var receiveTab, addressesTab, sendTab *container.TabItem
+	var addressesTab, sendTab *container.TabItem
 	var rpcFooterStatus *widget.Label
 
 	// ── Wallet and Receive tabs ────────────────────────────────────────────────────────
@@ -293,7 +318,6 @@ func main() {
 		}
 		wlt = newWallet
 		if tabs != nil {
-			tabs.EnableItem(receiveTab)
 			tabs.EnableItem(addressesTab)
 			tabs.EnableItem(sendTab)
 		}
@@ -368,18 +392,7 @@ func main() {
 		),
 	)
 
-	receiveTab = container.NewTabItem("Receive",
-		container.NewVBox(
-			newAddrBtn,
-			widget.NewLabel("Your P2QPK address:"),
-			addrDisplay,
-			copyAddrBtn,
-			widget.NewSeparator(),
-			concentrationWarning,
-		),
-	)
-
-	// ── Addresses tab ──────────────────────────────────────────────────────
+	// ── My Addresses tab ──────────────────────────────────────────────────────
 
 	addrListBox := container.NewVBox()
 	addrListScroll := container.NewVScroll(addrListBox)
@@ -650,13 +663,20 @@ func main() {
 		renderAddressList()
 	})
 
-	addressesTab = container.NewTabItem("Addresses",
+	addressesTab = container.NewTabItem("My Addresses",
 		container.NewVBox(
 			refreshBtn,
 			showSpentRetiredCheck,
 			addrListScroll,
 			widget.NewSeparator(),
 			addrStatusLabel,
+			widget.NewSeparator(),
+			newAddrBtn,
+			widget.NewLabel("Your P2QPK address:"),
+			addrDisplay,
+			copyAddrBtn,
+			widget.NewSeparator(),
+			concentrationWarning,
 		),
 	)
 
@@ -668,7 +688,7 @@ func main() {
 	//   3. Enter amount in QOGE
 	//   4. Click "Preview" → fetches UTXO, computes change, shows confirm dialog
 	//   5. Click "Sign" in dialog → signs, serializes BIP144, displays raw hex
-	//   6. Broadcast manually: qogecoin-cli sendrawtransaction <hex>
+	//   6. Run Test in Mempool successfully to enable Broadcast Transaction.
 	//
 	// Refresh automatically marks the source SPENT after its tracked transaction
 	// reaches one on-chain confirmation.
@@ -728,6 +748,8 @@ func main() {
 	// memory. It is never rendered directly into a text widget — only a short
 	// preview is shown on screen to avoid freezing the GUI with 34,528 chars.
 	var signedTxHex string
+	var broadcastContext signedBroadcastContext
+	var broadcastGate broadcastGate
 
 	rawHexPreviewLabel := widget.NewLabel("(no signed transaction yet)")
 	rawHexPreviewLabel.TextStyle = fyne.TextStyle{Monospace: true}
@@ -741,7 +763,12 @@ func main() {
 		sendStatusLabel.SetText("Full transaction hex copied to clipboard.")
 	})
 
+	broadcastBtn := widget.NewButton("⚠ Broadcast Transaction", nil)
+	broadcastBtn.Importance = widget.DangerImportance
+	broadcastGate.Reset(broadcastBtn)
+
 	testMempoolBtn := widget.NewButton("Test in Mempool (testmempoolaccept)", func() {
+		broadcastGate.Reset(broadcastBtn)
 		if signedTxHex == "" {
 			sendStatusLabel.SetText("No signed transaction — preview and sign first.")
 			return
@@ -756,6 +783,7 @@ func main() {
 			return
 		}
 		if result.Allowed {
+			broadcastGate.RecordMempoolResult(signedTxHex, true, broadcastBtn)
 			sendStatusLabel.SetText(fmt.Sprintf(
 				"testmempoolaccept: ALLOWED  vsize=%d  fee=%g QOGE", result.VSize, result.Fees.Base))
 		} else {
@@ -763,6 +791,49 @@ func main() {
 				"testmempoolaccept: REJECTED  reason: %s", result.RejectReason))
 		}
 	})
+
+	broadcastBtn.OnTapped = func() {
+		if !broadcastGate.Allows(signedTxHex) || broadcastContext.rawHex != signedTxHex {
+			sendStatusLabel.SetText("Broadcast blocked — run Test in Mempool successfully for the current signed transaction first.")
+			broadcastGate.Reset(broadcastBtn)
+			return
+		}
+		if rpc == nil {
+			sendStatusLabel.SetText("Broadcast blocked — no node connected.")
+			return
+		}
+
+		ctx := broadcastContext
+		message := fmt.Sprintf(
+			"This will broadcast a real, irreversible mainnet transaction.\n\n"+
+				"Destination: %s\n"+
+				"Type: %s\n"+
+				"Amount: %s QOGE (%d sat)\n\n"+
+				"Broadcast this transaction now?",
+			ctx.destination, ctx.destinationType, rpcclient.FormatQOGE(ctx.amountSats), ctx.amountSats,
+		)
+		confirm := dialog.NewConfirm("Confirm Broadcast", message, func(ok bool) {
+			if !ok {
+				sendStatusLabel.SetText("Broadcast cancelled.")
+				return
+			}
+			if !broadcastGate.Allows(signedTxHex) || ctx.rawHex != signedTxHex {
+				sendStatusLabel.SetText("Broadcast blocked — signed transaction changed after confirmation opened.")
+				broadcastGate.Reset(broadcastBtn)
+				return
+			}
+			txid, err := rpc.SendRawTransaction(context.Background(), ctx.rawHex)
+			if err != nil {
+				sendStatusLabel.SetText(fmt.Sprintf("sendrawtransaction RPC error: %v", err))
+				return
+			}
+			broadcastGate.Reset(broadcastBtn)
+			sendStatusLabel.SetText(fmt.Sprintf("Transaction broadcast successfully.\nTxid: %s", txid))
+		}, w)
+		confirm.SetConfirmText("Broadcast Now")
+		confirm.SetConfirmImportance(widget.SuccessImportance)
+		confirm.Show()
+	}
 
 	// populateSendDropdowns refreshes the From/To dropdowns from the current
 	// wallet state. Called each time the Preview button is clicked so the
@@ -802,6 +873,7 @@ func main() {
 	}
 
 	previewBtn := widget.NewButton("Preview Transaction", func() {
+		broadcastGate.Reset(broadcastBtn)
 		if wlt == nil {
 			sendStatusLabel.SetText("Open a wallet first.")
 			return
@@ -919,9 +991,9 @@ func main() {
 				"%s"+
 				"UTXO:      %s:%d  (%s QOGE)\n\n"+
 				"⚠  This will irreversibly spend real mainnet QOGE.\n"+
-				"   The signed transaction will NOT be broadcast automatically.\n"+
-				"   You must broadcast it manually via:\n"+
-				"     qogecoin-cli sendrawtransaction <hex>",
+				"   Signing does NOT broadcast automatically.\n"+
+				"   After signing, run Test in Mempool, then use the separate\n"+
+				"   Broadcast Transaction button.",
 			fromAddr,
 			toAddr,
 			toDestination.Type,
@@ -1010,6 +1082,9 @@ func main() {
 				}
 
 				signedTxHex = hex.EncodeToString(raw)
+				broadcastContext = signedBroadcastContext{
+					rawHex: signedTxHex, destination: toAddr, destinationType: toDestination.Type, amountSats: sendSats,
+				}
 				// Show a short preview — never render the full 34,528-char string
 				// into a widget (confirmed cause of GUI freeze on real P2QPK tx).
 				preview := fmt.Sprintf("%d bytes  /  %d hex chars\n%s…\n…%s",
@@ -1024,7 +1099,7 @@ func main() {
 				if changeSats > 0 {
 					statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)
 				}
-				statusMsg += "Broadcast manually: qogecoin-cli sendrawtransaction <hex>"
+				statusMsg += "Run Test in Mempool successfully to enable Broadcast Transaction."
 				sendStatusLabel.SetText(statusMsg)
 			},
 			w,
@@ -1058,10 +1133,11 @@ func main() {
 			widget.NewLabel("Fee: 0.0001 QOGE (fixed)"),
 			previewBtn,
 			widget.NewSeparator(),
-			widget.NewLabel("Signed transaction hex (broadcast manually):"),
+			widget.NewLabel("Signed transaction hex:"),
 			rawHexPreviewLabel,
 			copyTxHexBtn,
 			testMempoolBtn,
+			broadcastBtn,
 			widget.NewSeparator(),
 			sendStatusLabel,
 		),
@@ -1069,7 +1145,7 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs = newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	tabs = newMainTabs(walletTab, addressesTab, sendTab, networkTab)
 	footer := container.NewVBox(widget.NewSeparator(), rpcFooterStatus)
 	w.SetContent(container.NewBorder(nil, footer, nil, nil, tabs))
 

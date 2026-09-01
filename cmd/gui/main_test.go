@@ -152,13 +152,12 @@ func TestResolveSendDestinationKeepsWalletAndExternalModesSeparate(t *testing.T)
 
 func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
-	receiveTab := container.NewTabItem("Receive", widget.NewLabel("receive"))
-	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
-	addressesTab := container.NewTabItem("Addresses", widget.NewLabel("addresses"))
+	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
+	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
 
-	tabs := newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
-	wantOrder := []string{"Wallet", "Receive", "Network", "Addresses", "Send"}
+	tabs := newMainTabs(walletTab, addressesTab, sendTab, networkTab)
+	wantOrder := []string{"Wallet", "My Addresses", "Send", "Network"}
 	if len(tabs.Items) != len(wantOrder) {
 		t.Fatalf("tab count = %d, want %d", len(tabs.Items), len(wantOrder))
 	}
@@ -170,7 +169,7 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	if walletTab.Disabled() || networkTab.Disabled() {
 		t.Fatal("Wallet and Network must be available before a wallet is loaded")
 	}
-	for _, item := range []*container.TabItem{receiveTab, addressesTab, sendTab} {
+	for _, item := range []*container.TabItem{addressesTab, sendTab} {
 		if !item.Disabled() {
 			t.Fatalf("%s tab enabled before wallet load", item.Text)
 		}
@@ -186,23 +185,50 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	defer fynetest.NewApp()
 
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
-	receiveTab := container.NewTabItem("Receive", widget.NewLabel("receive"))
-	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
-	addressesTab := container.NewTabItem("Addresses", widget.NewLabel("addresses"))
+	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
-	tabs := newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab)
+	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
+	tabs := newMainTabs(walletTab, addressesTab, sendTab, networkTab)
 	w := fynetest.NewWindow(tabs)
 	defer w.Close()
 	w.SetPadded(false)
 	w.Resize(fyne.NewSize(620, 120))
 
-	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(110, 10))
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(130, 10))
 	if tabs.Selected() != walletTab {
-		t.Fatalf("clicking disabled Receive selected %q, want Wallet", tabs.Selected().Text)
+		t.Fatalf("clicking disabled My Addresses selected %q, want Wallet", tabs.Selected().Text)
 	}
-	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(205, 10))
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(300, 10))
 	if tabs.Selected() != networkTab {
 		t.Fatalf("clicking enabled Network selected %q, want Network", tabs.Selected().Text)
+	}
+}
+
+func TestBroadcastGateRequiresAllowedCurrentTransaction(t *testing.T) {
+	button := widget.NewButton("Broadcast", nil)
+	var gate broadcastGate
+
+	gate.Reset(button)
+	if !button.Disabled() || gate.Allows("tx-a") {
+		t.Fatal("broadcast available before mempool approval")
+	}
+
+	gate.RecordMempoolResult("tx-a", false, button)
+	if !button.Disabled() || gate.Allows("tx-a") {
+		t.Fatal("rejected mempool test enabled broadcast")
+	}
+
+	gate.RecordMempoolResult("tx-a", true, button)
+	if button.Disabled() || !gate.Allows("tx-a") {
+		t.Fatal("allowed mempool test did not enable the approved transaction")
+	}
+	if gate.Allows("tx-b") {
+		t.Fatal("approval for tx-a authorized a different signed transaction")
+	}
+
+	gate.Reset(button) // Preview/re-sign starts a new transaction cycle.
+	if !button.Disabled() || gate.Allows("tx-a") || gate.Allows("tx-b") {
+		t.Fatal("new preview/sign cycle did not clear broadcast approval")
 	}
 }
 

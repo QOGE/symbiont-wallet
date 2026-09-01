@@ -10,6 +10,32 @@ import (
 	"testing"
 )
 
+func TestSendRawTransaction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Method != "sendrawtransaction" {
+			t.Fatalf("method = %q, want sendrawtransaction", req.Method)
+		}
+		if len(req.Params) != 1 || req.Params[0] != "deadbeef" {
+			t.Fatalf("params = %v, want [deadbeef]", req.Params)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"result": "abc123", "error": nil, "id": 1})
+	}))
+	defer server.Close()
+
+	client := New(strings.TrimPrefix(server.URL, "http://"), "", "")
+	txid, err := client.SendRawTransaction(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txid != "abc123" {
+		t.Fatalf("txid = %q, want abc123", txid)
+	}
+}
+
 func TestTransactionConfirmations(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

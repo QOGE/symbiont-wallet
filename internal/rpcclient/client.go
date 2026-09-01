@@ -176,6 +176,19 @@ func (c *Client) TransactionConfirmations(ctx context.Context, txid string) (con
 	return info.Confirmations, true, nil
 }
 
+// SendRawTransaction submits a fully signed raw transaction and returns the
+// daemon-reported transaction ID.
+func (c *Client) SendRawTransaction(ctx context.Context, rawHex string) (string, error) {
+	var txid string
+	if err := c.call(ctx, "sendrawtransaction", []any{rawHex}, &txid); err != nil {
+		return "", err
+	}
+	if txid == "" {
+		return "", fmt.Errorf("rpcclient: sendrawtransaction: empty txid")
+	}
+	return txid, nil
+}
+
 // ── testmempoolaccept ─────────────────────────────────────────────────────────
 
 // MempoolAcceptResult is one entry from testmempoolaccept's response array.
