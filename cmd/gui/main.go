@@ -1,10 +1,9 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
-// Three tabs:
-//   - Receive:   explicitly open or create a wallet and generate a fresh P2QPK address.
-//   - Addresses: list every address with its lifecycle state and optional on-chain balance.
-//   - Send:      build, preview, sign, and display a raw P2QPK spend transaction.
-//     broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
+// Five tabs: Wallet lifecycle, Receive address generation, Network RPC setup,
+// Addresses/state tracking, and Send transaction construction.
+//
+//	broadcast is manual (copy hex → qogecoin-cli sendrawtransaction).
 package main
 
 import (
@@ -24,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
+	qogeaddress "github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/internal/rpcclient"
 	"github.com/saogen/qoge-sphincs-wallet/internal/txbuilder"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
@@ -160,6 +160,32 @@ func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired bool) (visi
 		visible = append(visible, info)
 	}
 	return visible, hidden
+}
+
+const (
+	recipientModeWallet   = "Wallet address"
+	recipientModeExternal = "External address"
+)
+
+func resolveSendDestination(external bool, walletAddress, externalAddress string) (string, qogeaddress.Destination, error) {
+	addr := walletAddress
+	if external {
+		addr = externalAddress
+	}
+	if addr == "" {
+		if external {
+			return "", qogeaddress.Destination{}, fmt.Errorf("enter an external destination address")
+		}
+		return "", qogeaddress.Destination{}, fmt.Errorf("select a wallet-owned FRESH destination address")
+	}
+	destination, err := qogeaddress.DecodeMainnetDestination(addr)
+	if err != nil {
+		return "", qogeaddress.Destination{}, err
+	}
+	if !external && destination.Type != qogeaddress.DestinationP2QPK {
+		return "", qogeaddress.Destination{}, fmt.Errorf("wallet-owned destination is %s, want P2QPK", destination.Type)
+	}
+	return addr, destination, nil
 }
 
 func newMainTabs(walletTab, receiveTab, networkTab, addressesTab, sendTab *container.TabItem) *container.AppTabs {
@@ -638,7 +664,7 @@ func main() {
 	//
 	// Flow:
 	//   1. Select From address (must be FUNDED)
-	//   2. Select To address (must be FRESH — wallet-controlled)
+	//   2. Select a wallet-owned FRESH destination or explicitly enter an external one
 	//   3. Enter amount in QOGE
 	//   4. Click "Preview" → fetches UTXO, computes change, shows confirm dialog
 	//   5. Click "Sign" in dialog → signs, serializes BIP144, displays raw hex
@@ -652,6 +678,45 @@ func main() {
 
 	sendToSelect := widget.NewSelect(nil, nil)
 	sendToSelect.PlaceHolder = "(no FRESH addresses)"
+
+	internalToLabel := widget.NewLabel("Wallet-owned To address (FRESH):")
+	externalToLabel := widget.NewLabel("External mainnet address:")
+	externalToEntry := widget.NewEntry()
+	externalToEntry.SetPlaceHolder("P2PKH, P2SH, P2WPKH, P2WSH, P2TR, or P2QPK")
+	externalValidationLabel := widget.NewLabel("")
+	externalValidationLabel.Wrapping = fyne.TextWrapWord
+
+	recipientMode := widget.NewRadioGroup([]string{recipientModeWallet, recipientModeExternal}, nil)
+	recipientMode.Horizontal = true
+	recipientMode.OnChanged = func(mode string) {
+		external := mode == recipientModeExternal
+		if external {
+			internalToLabel.Hide()
+			sendToSelect.Hide()
+			externalToLabel.Show()
+			externalToEntry.Show()
+			externalValidationLabel.Show()
+		} else {
+			internalToLabel.Show()
+			sendToSelect.Show()
+			externalToLabel.Hide()
+			externalToEntry.Hide()
+			externalValidationLabel.Hide()
+		}
+	}
+	externalToEntry.OnChanged = func(value string) {
+		if value == "" {
+			externalValidationLabel.SetText("")
+			return
+		}
+		destination, err := qogeaddress.DecodeMainnetDestination(value)
+		if err != nil {
+			externalValidationLabel.SetText(fmt.Sprintf("Invalid external address: %v", err))
+			return
+		}
+		externalValidationLabel.SetText(fmt.Sprintf("Valid Qogecoin mainnet destination: %s", destination.Type))
+	}
+	recipientMode.SetSelected(recipientModeWallet)
 
 	amountEntry := widget.NewEntry()
 	amountEntry.SetPlaceHolder("e.g. 1 or 0.5")
@@ -682,7 +747,7 @@ func main() {
 			return
 		}
 		if rpc == nil {
-			sendStatusLabel.SetText("No node connected — connect from the Addresses tab first.")
+			sendStatusLabel.SetText("No node connected — connect from the Network tab first.")
 			return
 		}
 		result, err := rpc.TestMempoolAccept(context.Background(), signedTxHex)
@@ -742,7 +807,7 @@ func main() {
 			return
 		}
 		if rpc == nil {
-			sendStatusLabel.SetText("Node RPC required to fetch UTXO — connect from the Addresses tab.")
+			sendStatusLabel.SetText("Node RPC required to fetch UTXO — connect from the Network tab.")
 			return
 		}
 
@@ -753,9 +818,13 @@ func main() {
 			sendStatusLabel.SetText("Select a From address (FUNDED).")
 			return
 		}
-		toAddr := sendToSelect.Selected
-		if toAddr == "" {
-			sendStatusLabel.SetText("Select a To address (FRESH).")
+		toAddr, toDestination, err := resolveSendDestination(
+			recipientMode.Selected == recipientModeExternal,
+			sendToSelect.Selected,
+			externalToEntry.Text,
+		)
+		if err != nil {
+			sendStatusLabel.SetText(fmt.Sprintf("Invalid destination: %v", err))
 			return
 		}
 
@@ -843,7 +912,8 @@ func main() {
 		}
 		previewText := fmt.Sprintf(
 			"From:      %s\n\n"+
-				"To:        %s\n\n"+
+				"To:        %s\n"+
+				"Type:      %s\n\n"+
 				"Amount:    %s QOGE  (%d sat)\n"+
 				"Fee:       0.00010000 QOGE  (%d sat)  [fixed]\n"+
 				"%s"+
@@ -854,6 +924,7 @@ func main() {
 				"     qogecoin-cli sendrawtransaction <hex>",
 			fromAddr,
 			toAddr,
+			toDestination.Type,
 			rpcclient.FormatQOGE(sendSats), sendSats,
 			feeSats,
 			changeLines,
@@ -887,11 +958,7 @@ func main() {
 					return
 				}
 
-				toScript, err := txbuilder.P2QPKScript(toAddr)
-				if err != nil {
-					sendStatusLabel.SetText(fmt.Sprintf("to script error: %v", err))
-					return
-				}
+				toScript := append([]byte(nil), toDestination.ScriptPubKey...)
 
 				// Build outputs and params depending on whether there is change.
 				spendOutputs := []wallet.SpendOutput{{Amount: sendSats, Script: toScript}}
@@ -975,14 +1042,20 @@ func main() {
 
 	sendTab = container.NewTabItem("Send",
 		container.NewVBox(
+			refreshSendBtn,
+			widget.NewSeparator(),
 			widget.NewLabel("From address (FUNDED — confirmed and spendable):"),
 			sendFromSelect,
-			widget.NewLabel("To address (FRESH — wallet-controlled recipient):"),
+			widget.NewLabel("Destination mode:"),
+			recipientMode,
+			internalToLabel,
 			sendToSelect,
+			externalToLabel,
+			externalToEntry,
+			externalValidationLabel,
 			widget.NewLabel("Amount (QOGE):"),
 			amountEntry,
 			widget.NewLabel("Fee: 0.0001 QOGE (fixed)"),
-			refreshSendBtn,
 			previewBtn,
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex (broadcast manually):"),

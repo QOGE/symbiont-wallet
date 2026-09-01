@@ -32,7 +32,9 @@
 //
 // ── Taproot (witver=1) ────────────────────────────────────────────────────
 //
-// Taproot (P2TR / witver=1) addresses are explicitly rejected by decode().
+// Taproot (P2TR / witver=1) addresses are explicitly rejected by decode(),
+// which is the wallet-owned P2QPK decoder. DecodeMainnetDestination accepts
+// P2TR only as an output destination; it does not make Taproot wallet-owned.
 // SIP-QOGE-PQC-02 Section 4 explains why: a Taproot output's key-path
 // spending condition is a secp256k1 point present in the address at rest,
 // which a CRQC can attack via Shor's algorithm independent of any script-
@@ -44,7 +46,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/btcsuite/btcutil/base58"
 	"github.com/btcsuite/btcutil/bech32"
 )
 
@@ -157,6 +161,104 @@ func DecodeForNetwork(addr string, net Network) ([]byte, error) {
 func ValidateAddress(addr string) error {
 	_, _, err := decode(addr)
 	return err
+}
+
+const (
+	MainnetPubKeyHashPrefix byte = 120
+	MainnetScriptHashPrefix byte = 102
+)
+
+// DestinationType identifies the locking-script form encoded by an address.
+type DestinationType string
+
+const (
+	DestinationP2PKH  DestinationType = "Legacy P2PKH"
+	DestinationP2SH   DestinationType = "Legacy P2SH"
+	DestinationP2WPKH DestinationType = "P2WPKH"
+	DestinationP2WSH  DestinationType = "P2WSH"
+	DestinationP2TR   DestinationType = "P2TR"
+	DestinationP2QPK  DestinationType = "P2QPK"
+)
+
+// Destination is a strictly validated Qogecoin mainnet destination and its
+// canonical scriptPubKey.
+type Destination struct {
+	Type         DestinationType
+	ScriptPubKey []byte
+}
+
+// DecodeMainnetDestination validates a Qogecoin mainnet address and constructs
+// its canonical scriptPubKey. It accepts legacy Base58Check and defined SegWit
+// destination forms, including this wallet's witness-v2 P2QPK format.
+func DecodeMainnetDestination(addr string) (Destination, error) {
+	if addr == "" || strings.TrimSpace(addr) != addr {
+		return Destination{}, fmt.Errorf("%w: empty address or surrounding whitespace", ErrInvalidAddress)
+	}
+
+	payload, version, baseErr := base58.CheckDecode(addr)
+	if baseErr == nil {
+		if len(payload) != 20 {
+			return Destination{}, fmt.Errorf("%w: legacy payload length %d (want 20)", ErrInvalidAddress, len(payload))
+		}
+		switch version {
+		case MainnetPubKeyHashPrefix:
+			script := append([]byte{0x76, 0xa9, 0x14}, payload...)
+			script = append(script, 0x88, 0xac)
+			return Destination{Type: DestinationP2PKH, ScriptPubKey: script}, nil
+		case MainnetScriptHashPrefix:
+			script := append([]byte{0xa9, 0x14}, payload...)
+			script = append(script, 0x87)
+			return Destination{Type: DestinationP2SH, ScriptPubKey: script}, nil
+		default:
+			return Destination{}, fmt.Errorf("%w: legacy version byte %d is not Qogecoin mainnet", ErrInvalidAddress, version)
+		}
+	}
+
+	hrp, data, constant, err := decodeGeneric(addr)
+	if err != nil {
+		return Destination{}, fmt.Errorf("%w: Base58Check: %v; SegWit: %v", ErrInvalidAddress, baseErr, err)
+	}
+	if hrp != Mainnet.HRP() {
+		return Destination{}, fmt.Errorf("%w: got %q, want %q", ErrWrongHRP, hrp, Mainnet.HRP())
+	}
+	if len(data) == 0 || data[0] > 16 {
+		return Destination{}, fmt.Errorf("%w: invalid witness version", ErrInvalidAddress)
+	}
+	witver := int(data[0])
+	if constant != constantForWitnessVersion(witver) {
+		return Destination{}, fmt.Errorf("%w: checksum encoding does not match witness version %d (BIP350)", ErrInvalidAddress, witver)
+	}
+	program, err := bech32.ConvertBits(data[1:], 5, 8, false)
+	if err != nil {
+		return Destination{}, fmt.Errorf("%w: invalid witness program encoding: %v", ErrInvalidAddress, err)
+	}
+	if len(program) < 2 || len(program) > 40 {
+		return Destination{}, fmt.Errorf("%w: witness program length %d outside 2..40", ErrInvalidAddress, len(program))
+	}
+
+	var typ DestinationType
+	switch {
+	case witver == 0 && len(program) == 20:
+		typ = DestinationP2WPKH
+	case witver == 0 && len(program) == 32:
+		typ = DestinationP2WSH
+	case witver == 1 && len(program) == 32:
+		typ = DestinationP2TR
+	case witver == WitnessVersion && len(program) == AddressLength:
+		typ = DestinationP2QPK
+	default:
+		return Destination{}, fmt.Errorf("%w: unsupported witness version/program length %d/%d", ErrInvalidAddress, witver, len(program))
+	}
+
+	opcode := byte(0x00)
+	if witver > 0 {
+		opcode = byte(0x50 + witver)
+	}
+	script := make([]byte, 2+len(program))
+	script[0] = opcode
+	script[1] = byte(len(program))
+	copy(script[2:], program)
+	return Destination{Type: typ, ScriptPubKey: script}, nil
 }
 
 // MatchesPublicKey returns true if addr was derived from pubKey.

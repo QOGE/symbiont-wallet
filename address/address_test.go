@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/btcsuite/btcutil/base58"
 	"github.com/btcsuite/btcutil/bech32"
 )
 
@@ -374,5 +375,119 @@ func BenchmarkFromPublicKey(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = FromPublicKey(pub)
+	}
+}
+
+func encodeWitnessDestinationForTest(t *testing.T, witver byte, program []byte) string {
+	t.Helper()
+	converted, err := bech32.ConvertBits(program, 8, 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeGeneric(HRP, append([]byte{witver}, converted...), constantForWitnessVersion(int(witver)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func witnessScriptForTest(witver byte, program []byte) []byte {
+	opcode := byte(0)
+	if witver > 0 {
+		opcode = 0x50 + witver
+	}
+	script := []byte{opcode, byte(len(program))}
+	return append(script, program...)
+}
+
+func tamperAddressForTest(addr string) string {
+	last := byte('q')
+	if addr[len(addr)-1] == last {
+		last = 'p'
+	}
+	return addr[:len(addr)-1] + string(last)
+}
+
+func TestDecodeMainnetDestinationTypesAndScripts(t *testing.T) {
+	hash20 := bytes.Repeat([]byte{0x11}, 20)
+	hash32 := bytes.Repeat([]byte{0x22}, 32)
+	p2pkhScript := append([]byte{0x76, 0xa9, 0x14}, hash20...)
+	p2pkhScript = append(p2pkhScript, 0x88, 0xac)
+	p2shScript := append([]byte{0xa9, 0x14}, hash20...)
+	p2shScript = append(p2shScript, 0x87)
+
+	tests := []struct {
+		name   string
+		addr   string
+		typ    DestinationType
+		script []byte
+	}{
+		{"p2pkh", base58.CheckEncode(hash20, MainnetPubKeyHashPrefix), DestinationP2PKH, p2pkhScript},
+		{"p2sh", base58.CheckEncode(hash20, MainnetScriptHashPrefix), DestinationP2SH, p2shScript},
+		{"p2wpkh", encodeWitnessDestinationForTest(t, 0, hash20), DestinationP2WPKH, witnessScriptForTest(0, hash20)},
+		{"p2wsh", encodeWitnessDestinationForTest(t, 0, hash32), DestinationP2WSH, witnessScriptForTest(0, hash32)},
+		{"p2tr", encodeWitnessDestinationForTest(t, 1, hash32), DestinationP2TR, witnessScriptForTest(1, hash32)},
+		{"p2qpk", encodeWitnessDestinationForTest(t, WitnessVersion, hash32), DestinationP2QPK, witnessScriptForTest(WitnessVersion, hash32)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			destination, err := DecodeMainnetDestination(tc.addr)
+			if err != nil {
+				t.Fatalf("DecodeMainnetDestination(%s): %v", tc.addr, err)
+			}
+			if destination.Type != tc.typ {
+				t.Fatalf("type = %q, want %q", destination.Type, tc.typ)
+			}
+			if !bytes.Equal(destination.ScriptPubKey, tc.script) {
+				t.Fatalf("script = %x, want %x", destination.ScriptPubKey, tc.script)
+			}
+			if _, err := DecodeMainnetDestination(tamperAddressForTest(tc.addr)); err == nil {
+				t.Fatal("checksum-tampered address was accepted")
+			}
+		})
+	}
+}
+
+func TestDecodeMainnetDestinationEnforcesWitnessChecksumVariant(t *testing.T) {
+	program := bytes.Repeat([]byte{0x44}, 32)
+	converted, err := bech32.ConvertBits(program, 8, 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v0WithBech32m, err := encodeGeneric(HRP, append([]byte{0}, converted...), bech32mConst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMainnetDestination(v0WithBech32m); err == nil {
+		t.Fatal("witness v0 encoded with Bech32m was accepted")
+	}
+
+	v1WithBech32, err := encodeGeneric(HRP, append([]byte{1}, converted...), bech32Const)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMainnetDestination(v1WithBech32); err == nil {
+		t.Fatal("witness v1 encoded with Bech32 was accepted")
+	}
+}
+
+func TestDecodeMainnetDestinationRejectsOtherNetworks(t *testing.T) {
+	hash20 := bytes.Repeat([]byte{0x33}, 20)
+	if _, err := DecodeMainnetDestination(base58.CheckEncode(hash20, 65)); err == nil {
+		t.Fatal("testnet P2PKH address accepted on mainnet")
+	}
+
+	converted, err := bech32.ConvertBits(hash20, 8, 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testnet, err := encodeGeneric(Testnet.HRP(), append([]byte{0}, converted...), bech32Const)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMainnetDestination(testnet); err == nil {
+		t.Fatal("testnet P2WPKH address accepted on mainnet")
 	}
 }

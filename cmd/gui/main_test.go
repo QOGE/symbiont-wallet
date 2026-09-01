@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -13,6 +14,9 @@ import (
 	fynetest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/btcsuite/btcutil/base58"
+
+	qogeaddress "github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/internal/rpcclient"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	"github.com/saogen/qoge-sphincs-wallet/wallet"
@@ -108,6 +112,41 @@ func TestRPCFooterStatusUpdates(t *testing.T) {
 	updateRPCStatus(status, localMainnetRPCEndpoint, nil)
 	if status.Text != "Connected to 127.0.0.1:8332" {
 		t.Fatalf("auto-connect status = %q", status.Text)
+	}
+}
+
+func TestResolveSendDestinationKeepsWalletAndExternalModesSeparate(t *testing.T) {
+	walletAddr, err := qogeaddress.FromPublicKey(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalAddr := base58.CheckEncode(bytes.Repeat([]byte{0x24}, 20), qogeaddress.MainnetPubKeyHashPrefix)
+
+	addr, destination, err := resolveSendDestination(false, walletAddr, externalAddr)
+	if err != nil {
+		t.Fatalf("wallet mode: %v", err)
+	}
+	if addr != walletAddr || destination.Type != qogeaddress.DestinationP2QPK {
+		t.Fatalf("wallet mode resolved %q/%s, want wallet P2QPK", addr, destination.Type)
+	}
+
+	addr, destination, err = resolveSendDestination(true, walletAddr, externalAddr)
+	if err != nil {
+		t.Fatalf("external mode: %v", err)
+	}
+	if addr != externalAddr || destination.Type != qogeaddress.DestinationP2PKH {
+		t.Fatalf("external mode resolved %q/%s, want external P2PKH", addr, destination.Type)
+	}
+
+	tampered := externalAddr[:len(externalAddr)-1] + "1"
+	if _, _, err := resolveSendDestination(true, walletAddr, tampered); err == nil {
+		t.Fatal("external mode accepted a checksum-tampered address")
+	}
+	if _, _, err := resolveSendDestination(false, "", externalAddr); err == nil {
+		t.Fatal("wallet mode fell back to the populated external field")
+	}
+	if _, _, err := resolveSendDestination(true, walletAddr, ""); err == nil {
+		t.Fatal("external mode fell back to the selected wallet address")
 	}
 }
 
