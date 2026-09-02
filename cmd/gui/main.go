@@ -237,13 +237,10 @@ func main() {
 	var rpcFooterStatus *widget.Label
 	var addressesNavBtn, sendNavBtn *widget.Button
 
-	// ── Wallet and Receive tabs ────────────────────────────────────────────────────────
+	// ── Wallet tab ──────────────────────────────────────────────────────────────
 
 	walletStatus := widget.NewLabel("No wallet open.")
 	walletStatus.Wrapping = fyne.TextWrapWord
-
-	addrDisplay := widget.NewEntry()
-	addrDisplay.Disable()
 
 	seedEntry := widget.NewPasswordEntry()
 	seedEntry.SetPlaceHolder("32-byte seed, hex-encoded (64 hex chars)")
@@ -361,20 +358,6 @@ func main() {
 		loadWallet(true)
 	})
 
-	newAddrBtn := widget.NewButton("Generate New", func() {
-		if wlt == nil {
-			dialog.ShowError(fmt.Errorf("open a wallet first"), w)
-			return
-		}
-		addr, err := wlt.NextReceiveAddress()
-		if err != nil {
-			dialog.ShowError(err, w)
-			return
-		}
-		addrDisplay.SetText(addr)
-	})
-	newAddrBtn.Importance = widget.HighImportance
-
 	concentrationWarning := widget.NewLabel(
 		"For technical safety, avoid holding more than 5,000,000 QOGE in a " +
 			"single address. Very large single-address balances can affect how this " +
@@ -382,15 +365,6 @@ func main() {
 			"multiple addresses instead.",
 	)
 	concentrationWarning.Wrapping = fyne.TextWrapWord
-
-	copyAddrBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-		addr := addrDisplay.Text
-		if addr == "" {
-			return
-		}
-		w.Clipboard().SetContent(addr)
-	})
-	copyAddrBtn.Importance = widget.LowImportance
 
 	walletTab := container.NewTabItem("Wallet",
 		container.NewVBox(
@@ -748,9 +722,6 @@ func main() {
 			container.NewVBox(
 				widget.NewSeparator(),
 				container.NewBorder(nil, nil, addrStatusLabel, nil, container.NewCenter(refreshBtn)),
-				widget.NewSeparator(),
-				widget.NewLabel("Your P2QPK address:"),
-				container.NewBorder(nil, nil, newAddrBtn, copyAddrBtn, addrDisplay),
 				widget.NewSeparator(),
 				concentrationWarning,
 			),
