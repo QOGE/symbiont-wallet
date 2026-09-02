@@ -17,8 +17,11 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	qogeaddress "github.com/saogen/qoge-sphincs-wallet/address"
@@ -223,14 +226,16 @@ func newMainTabs(walletTab, addressesTab, sendTab, networkTab *container.TabItem
 
 func main() {
 	a := app.NewWithID("io.qoge.symbiont-wallet")
+	a.Settings().SetTheme(NewQogeTheme())
 	w := a.NewWindow("Symbiont Wallet")
-	w.Resize(fyne.NewSize(620, 640))
+	w.Resize(fyne.NewSize(1040, 840))
 
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
 	var addressesTab, sendTab *container.TabItem
 	var rpcFooterStatus *widget.Label
+	var addressesNavBtn, sendNavBtn *widget.Button
 
 	// ── Wallet and Receive tabs ────────────────────────────────────────────────────────
 
@@ -265,7 +270,7 @@ func main() {
 		widget.NewSeparator(),
 		backupWarning,
 		generatedSeedDisplay,
-		copySeedBtn,
+		container.NewCenter(copySeedBtn),
 	)
 	backupPanel.Hide()
 
@@ -321,6 +326,12 @@ func main() {
 			tabs.EnableItem(addressesTab)
 			tabs.EnableItem(sendTab)
 		}
+		if addressesNavBtn != nil {
+			addressesNavBtn.Enable()
+		}
+		if sendNavBtn != nil {
+			sendNavBtn.Enable()
+		}
 		if create {
 			walletStatus.SetText("New wallet created.")
 		} else {
@@ -345,11 +356,12 @@ func main() {
 	openBtn := widget.NewButton("Open Existing Wallet", func() {
 		loadWallet(false)
 	})
+	openBtn.Importance = widget.HighImportance
 	createBtn := widget.NewButton("Create New Wallet", func() {
 		loadWallet(true)
 	})
 
-	newAddrBtn := widget.NewButton("Generate New Address", func() {
+	newAddrBtn := widget.NewButton("Generate New", func() {
 		if wlt == nil {
 			dialog.ShowError(fmt.Errorf("open a wallet first"), w)
 			return
@@ -361,6 +373,7 @@ func main() {
 		}
 		addrDisplay.SetText(addr)
 	})
+	newAddrBtn.Importance = widget.HighImportance
 
 	concentrationWarning := widget.NewLabel(
 		"For technical safety, avoid holding more than 5,000,000 QOGE in a " +
@@ -370,23 +383,24 @@ func main() {
 	)
 	concentrationWarning.Wrapping = fyne.TextWrapWord
 
-	copyAddrBtn := widget.NewButton("Copy Address", func() {
+	copyAddrBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 		addr := addrDisplay.Text
 		if addr == "" {
 			return
 		}
 		w.Clipboard().SetContent(addr)
 	})
+	copyAddrBtn.Importance = widget.LowImportance
 
 	walletTab := container.NewTabItem("Wallet",
 		container.NewVBox(
 			widget.NewLabel("Seed (hex, 64 chars):"),
 			seedEntry,
-			openBtn,
+			container.NewCenter(openBtn),
+			widget.NewLabel(""),
 			backupPanel,
-			seedSavedCheck,
-			generateBtn,
-			createBtn,
+			container.NewHBox(createBtn),
+			container.NewHBox(generateBtn, seedSavedCheck),
 			widget.NewSeparator(),
 			walletStatus,
 		),
@@ -396,10 +410,21 @@ func main() {
 
 	addrListBox := container.NewVBox()
 	addrListScroll := container.NewVScroll(addrListBox)
-	addrListScroll.SetMinSize(fyne.NewSize(0, 330))
+	addrListScroll.SetMinSize(fyne.NewSize(0, 120))
 
-	addrStatusLabel := widget.NewLabel("Open a wallet, then press Refresh.")
+	addrStatusLabel := widget.NewLabel("Press Refresh to see your addresses.")
 	addrStatusLabel.Wrapping = fyne.TextWrapWord
+	spendableSummary := widget.NewLabel("—")
+	spendableSummary.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
+	pendingSummary := widget.NewLabel("—")
+	pendingSummary.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
+	addressCountSummary := widget.NewLabel("—")
+	addressCountSummary.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
+	addressSummaryCards := container.NewGridWithColumns(3,
+		widget.NewCard("Spendable", "FUNDED", spendableSummary),
+		widget.NewCard("Pending", "SPEND_PENDING", pendingSummary),
+		widget.NewCard("Addresses", "Total", addressCountSummary),
+	)
 
 	type addressRenderState struct {
 		infos                  []wallet.AddressInfo
@@ -421,6 +446,25 @@ func main() {
 			return
 		}
 		visible, hidden := filterAddressInfos(lastAddressRender.infos, showSpentRetired)
+		addressCountSummary.SetText(fmt.Sprintf("%d", len(lastAddressRender.infos)))
+		if lastAddressRender.balances == nil {
+			spendableSummary.SetText("—")
+			pendingSummary.SetText("—")
+		} else {
+			var spendableSats, pendingSats int64
+			for _, info := range lastAddressRender.infos {
+				sats := lastAddressRender.balances[info.Address]
+				switch info.State {
+				case keystore.StateFunded:
+					spendableSats += sats
+				case keystore.StateSpendPending:
+					pendingSats += sats
+				}
+			}
+			spendableSummary.SetText(rpcclient.FormatQOGE(spendableSats) + " QOGE")
+			pendingSummary.SetText(rpcclient.FormatQOGE(pendingSats) + " QOGE")
+		}
+
 		addrListBox.RemoveAll()
 		if len(visible) == 0 {
 			addrListBox.Add(widget.NewLabel("(no visible addresses)"))
@@ -432,27 +476,56 @@ func main() {
 			if info.Reserved {
 				stateLabel = "FRESH/RESERVED"
 			}
-			var line string
+
+			balanceText := "—"
 			if lastAddressRender.balances != nil {
 				sats := lastAddressRender.balances[addr]
+				balanceText = rpcclient.FormatQOGE(sats)
 				if rpcclient.ExceedsConcentrationThreshold(sats) {
 					overThresholdCount++
-					line = fmt.Sprintf("[!] #%-3d  %-13s %-14s  %s",
-						info.Index, stateLabel, rpcclient.FormatQOGE(sats)+" QOGE", addr)
-				} else {
-					line = fmt.Sprintf("    #%-3d  %-13s %-14s  %s",
-						info.Index, stateLabel, rpcclient.FormatQOGE(sats)+" QOGE", addr)
 				}
-			} else {
-				line = fmt.Sprintf("#%-3d  %-13s %s", info.Index, stateLabel, addr)
 			}
-			lbl := widget.NewLabel(line)
-			lbl.TextStyle = fyne.TextStyle{Monospace: true}
-			copyBtn := widget.NewButton("Copy", func() {
+
+			stateColor := QGStateFresh
+			switch info.State {
+			case keystore.StateFunded:
+				stateColor = QGStateFunded
+			case keystore.StateSpendPending:
+				stateColor = QGStatePending
+			case keystore.StateSpent:
+				stateColor = QGStateSpent
+			case keystore.StateRetired:
+				stateColor = QGStateRetired
+			}
+			chipBackground := canvas.NewRectangle(QGStateTint(stateColor))
+			chipBackground.CornerRadius = 9
+			chipLabel := canvas.NewText(stateLabel, stateColor)
+			chipLabel.TextSize = 11
+			chip := container.NewGridWrap(fyne.NewSize(112, 28),
+				container.NewStack(chipBackground, container.NewCenter(chipLabel)))
+
+			indexLabel := widget.NewLabel(fmt.Sprintf("#%d", info.Index))
+			indexLabel.TextStyle = fyne.TextStyle{Monospace: true}
+			index := container.NewGridWrap(fyne.NewSize(48, 28), indexLabel)
+
+			addressLabel := widget.NewLabel(addr)
+			addressLabel.TextStyle = fyne.TextStyle{Monospace: true}
+			addressLabel.Truncation = fyne.TextTruncateEllipsis
+
+			balanceLabel := widget.NewLabel(balanceText)
+			balanceLabel.TextStyle = fyne.TextStyle{Monospace: true}
+			balanceLabel.Alignment = fyne.TextAlignTrailing
+			balance := container.NewGridWrap(fyne.NewSize(125, 28), balanceLabel)
+
+			copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 				w.Clipboard().SetContent(addr)
 				addrStatusLabel.SetText("Address copied to clipboard.")
 			})
-			addrListBox.Add(container.NewBorder(nil, nil, nil, copyBtn, lbl))
+			copyBtn.Importance = widget.LowImportance
+			left := container.NewHBox(index, chip)
+			right := container.NewHBox(balance, copyBtn)
+			row := container.NewBorder(nil, nil, left, right, addressLabel)
+			addrListBox.Add(container.NewVBox(row, widget.NewSeparator()))
 		}
 		addrListBox.Refresh()
 
@@ -522,6 +595,7 @@ func main() {
 		rpc = c
 		updateRPCStatus(rpcFooterStatus, ep, nil)
 	})
+	connectBtn.Importance = widget.HighImportance
 
 	networkTab := container.NewTabItem("Network",
 		container.NewVBox(
@@ -529,12 +603,12 @@ func main() {
 			rpcEndpoint,
 			rpcUser,
 			rpcPass,
-			connectBtn,
+			container.NewCenter(connectBtn),
 			widget.NewLabel("Local cookie authentication is attempted automatically when a wallet is opened or created."),
 		),
 	)
 
-	refreshBtn := widget.NewButton("Refresh", func() {
+	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		if wlt == nil {
 			addrStatusLabel.SetText("Open a wallet first.")
 			return
@@ -662,21 +736,26 @@ func main() {
 		hasAddressSnapshot = true
 		renderAddressList()
 	})
+	refreshBtn.Importance = widget.LowImportance
 
 	addressesTab = container.NewTabItem("My Addresses",
-		container.NewVBox(
-			refreshBtn,
-			showSpentRetiredCheck,
+		container.NewBorder(
+			container.NewVBox(
+				widget.NewLabelWithStyle("My Addresses", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				addressSummaryCards,
+				showSpentRetiredCheck,
+			),
+			container.NewVBox(
+				widget.NewSeparator(),
+				container.NewBorder(nil, nil, addrStatusLabel, nil, container.NewCenter(refreshBtn)),
+				widget.NewSeparator(),
+				widget.NewLabel("Your P2QPK address:"),
+				container.NewBorder(nil, nil, newAddrBtn, copyAddrBtn, addrDisplay),
+				widget.NewSeparator(),
+				concentrationWarning,
+			),
+			nil, nil,
 			addrListScroll,
-			widget.NewSeparator(),
-			addrStatusLabel,
-			widget.NewSeparator(),
-			newAddrBtn,
-			widget.NewLabel("Your P2QPK address:"),
-			addrDisplay,
-			copyAddrBtn,
-			widget.NewSeparator(),
-			concentrationWarning,
 		),
 	)
 
@@ -738,6 +817,7 @@ func main() {
 
 	amountEntry := widget.NewEntry()
 	amountEntry.SetPlaceHolder("e.g. 1 or 0.5")
+	amountField := container.NewGridWrap(fyne.NewSize(180, amountEntry.MinSize().Height), amountEntry)
 
 	sendStatusLabel := widget.NewLabel("")
 	sendStatusLabel.Wrapping = fyne.TextWrapWord
@@ -1004,7 +1084,7 @@ func main() {
 		content.Wrapping = fyne.TextWrapBreak
 
 		scrolledContent := container.NewVScroll(content)
-		scrolledContent.SetMinSize(fyne.NewSize(540, 280))
+		scrolledContent.SetMinSize(fyne.NewSize(760, 420))
 
 		sendStatusLabel.SetText("Preview ready — confirm to sign.")
 
@@ -1101,39 +1181,40 @@ func main() {
 			w,
 		)
 	})
+	previewBtn.Importance = widget.HighImportance
 
-	refreshSendBtn := widget.NewButton("Refresh Address Lists", func() {
+	refreshSendAddresses := func() {
 		if wlt == nil {
 			sendStatusLabel.SetText("Open a wallet first.")
 			return
 		}
 		populateSendDropdowns()
 		sendStatusLabel.SetText("Address lists refreshed.")
-	})
+	}
+	refreshSendBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), refreshSendAddresses)
+	refreshSendBtn.Importance = widget.LowImportance
+	refreshSendSpacer := container.NewGridWrap(refreshSendBtn.MinSize(), layout.NewSpacer())
 
 	sendTab = container.NewTabItem("Send",
 		container.NewVBox(
-			refreshSendBtn,
-			widget.NewSeparator(),
 			widget.NewLabel("From address: (FUNDED - spendable after 20 confirmations)"),
-			sendFromSelect,
+			container.NewBorder(nil, nil, nil, container.NewCenter(refreshSendBtn), sendFromSelect),
 			widget.NewLabel("Destination mode:"),
 			recipientMode,
 			internalToLabel,
-			sendToSelect,
+			container.NewBorder(nil, nil, nil, refreshSendSpacer, sendToSelect),
 			externalToLabel,
 			externalToEntry,
 			externalValidationLabel,
 			widget.NewLabel("Amount (QOGE):"),
-			amountEntry,
+			container.NewHBox(amountField, previewBtn),
 			widget.NewLabel("Fee: 0.0001 QOGE (fixed)"),
-			previewBtn,
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex:"),
 			rawHexPreviewLabel,
-			copyTxHexBtn,
-			testMempoolBtn,
-			broadcastBtn,
+			container.NewCenter(copyTxHexBtn),
+			container.NewCenter(testMempoolBtn),
+			container.NewCenter(broadcastBtn),
 			widget.NewSeparator(),
 			sendStatusLabel,
 		),
@@ -1142,8 +1223,59 @@ func main() {
 	// ── Window layout ──────────────────────────────────────────────────────
 
 	tabs = newMainTabs(walletTab, addressesTab, sendTab, networkTab)
-	footer := container.NewVBox(widget.NewSeparator(), rpcFooterStatus)
-	w.SetContent(container.NewBorder(nil, footer, nil, nil, tabs))
+
+	walletNavBtn := widget.NewButtonWithIcon("Wallet", theme.AccountIcon(), nil)
+	addressesNavBtn = widget.NewButtonWithIcon("My Addresses", theme.ListIcon(), nil)
+	sendNavBtn = widget.NewButtonWithIcon("Send", theme.MailSendIcon(), nil)
+	networkNavBtn := widget.NewButtonWithIcon("Network", theme.SettingsIcon(), nil)
+	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, sendNavBtn, networkNavBtn}
+	for _, button := range navButtons {
+		button.Alignment = widget.ButtonAlignLeading
+	}
+	addressesNavBtn.Disable()
+	sendNavBtn.Disable()
+
+	pages := []*container.TabItem{walletTab, addressesTab, sendTab, networkTab}
+	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, sendTab.Content, networkTab.Content)
+	selectPage := func(selected *container.TabItem, selectedButton *widget.Button) {
+		tabs.Select(selected)
+		for i, page := range pages {
+			if page == selected {
+				page.Content.Show()
+				navButtons[i].Importance = widget.HighImportance
+			} else {
+				page.Content.Hide()
+				navButtons[i].Importance = widget.LowImportance
+			}
+			navButtons[i].Refresh()
+		}
+		selectedButton.Refresh()
+		pageHost.Refresh()
+	}
+	walletNavBtn.OnTapped = func() { selectPage(walletTab, walletNavBtn) }
+	addressesNavBtn.OnTapped = func() { selectPage(addressesTab, addressesNavBtn) }
+	sendNavBtn.OnTapped = func() { selectPage(sendTab, sendNavBtn) }
+	networkNavBtn.OnTapped = func() { selectPage(networkTab, networkNavBtn) }
+	selectPage(walletTab, walletNavBtn)
+
+	const sidebarWidth float32 = 144
+	sidebar := container.NewVBox(
+		widget.NewLabelWithStyle("Symbiont", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewSeparator(),
+		container.NewGridWrap(fyne.NewSize(sidebarWidth, 42), walletNavBtn),
+		container.NewGridWrap(fyne.NewSize(sidebarWidth, 42), addressesNavBtn),
+		container.NewGridWrap(fyne.NewSize(sidebarWidth, 42), sendNavBtn),
+		container.NewGridWrap(fyne.NewSize(sidebarWidth, 42), networkNavBtn),
+	)
+	sidebarWithTheme := container.NewThemeOverride(sidebar, qogeSidebarTheme{Theme: NewQogeTheme()})
+	footer := container.NewStack(
+		canvas.NewRectangle(qgBg),
+		container.NewVBox(widget.NewSeparator(), rpcFooterStatus),
+	)
+	pageContent := container.New(layout.NewCustomPaddedLayout(0, 0, 5, 5), pageHost)
+	content := container.NewBorder(nil, nil, sidebarWithTheme, nil, pageContent)
+	contentWithBackground := container.NewStack(canvas.NewRectangle(qgSurface), content)
+	w.SetContent(container.NewBorder(nil, footer, nil, nil, contentWithBackground))
 
 	w.SetCloseIntercept(func() {
 		if wlt != nil {
