@@ -204,6 +204,28 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	}
 }
 
+func TestEqualWidthButtonsMatchWidest(t *testing.T) {
+	fynetest.NewApp()
+	defer fynetest.NewApp()
+
+	createBtn := widget.NewButton("Create New Wallet", nil)
+	generateBtn := widget.NewButton("Generate New Seed", nil)
+	wrapped := equalWidthButtons(createBtn, generateBtn)
+	if len(wrapped) != 2 {
+		t.Fatalf("wrapped count = %d, want 2", len(wrapped))
+	}
+	if wrapped[0].MinSize().Width != wrapped[1].MinSize().Width {
+		t.Fatalf("button widths %v vs %v", wrapped[0].MinSize().Width, wrapped[1].MinSize().Width)
+	}
+	want := createBtn.MinSize().Width
+	if generateBtn.MinSize().Width > want {
+		want = generateBtn.MinSize().Width
+	}
+	if wrapped[0].MinSize().Width != want {
+		t.Fatalf("fixed width = %v, want %v", wrapped[0].MinSize().Width, want)
+	}
+}
+
 func TestBroadcastGateRequiresAllowedCurrentTransaction(t *testing.T) {
 	button := widget.NewButton("Broadcast", nil)
 	var gate broadcastGate
