@@ -511,19 +511,15 @@ func main() {
 			indexText.Alignment = fyne.TextAlignTrailing
 			index := container.NewGridWrap(fyne.NewSize(addressIndexColWidth, addressListRowHeight), indexText)
 
-			addressText := canvas.NewText(addr, qgText)
+			addressText := canvas.NewText(addr, qgMuted)
 			addressText.TextSize = addressListTextSize
 			addressText.FontSource = fontSpaceMonoRegular
 
-			balanceColor := qgText
-			if balanceText == "—" {
-				balanceColor = qgMuted
-			}
-			balanceValue := canvas.NewText(balanceText, balanceColor)
+			balanceValue := canvas.NewText(balanceText, qgMuted)
 			balanceValue.TextSize = addressListTextSize
 			balanceValue.FontSource = fontSpaceMonoRegular
 
-			copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+			copyBtn := widget.NewButtonWithIcon("", theme.NewColoredResource(theme.ContentCopyIcon(), theme.ColorNamePlaceHolder), func() {
 				w.Clipboard().SetContent(addr)
 				addrStatusLabel.SetText("Address copied to clipboard.")
 			})
@@ -621,7 +617,7 @@ func main() {
 		),
 	)
 
-	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
+	refreshBtn := widget.NewButtonWithIcon("Refresh addresses", theme.ViewRefreshIcon(), func() {
 		if wlt == nil {
 			addrStatusLabel.SetText("Open a wallet first.")
 			return
@@ -750,6 +746,7 @@ func main() {
 		renderAddressList()
 	})
 	refreshBtn.Importance = widget.LowImportance
+	refreshBtn.IconPlacement = widget.ButtonIconTrailingText
 
 	addressesTab = container.NewTabItem("My Addresses",
 		container.NewBorder(
@@ -757,11 +754,11 @@ func main() {
 				pageTitle("My Addresses"),
 				pageIntro("Lifecycle state is shown on each row. Refresh updates balances from the connected node."),
 				addressSummaryCards,
-				showSpentRetiredCheck,
+				container.NewBorder(nil, nil, showSpentRetiredCheck, refreshBtn),
 			),
 			container.NewVBox(
 				widget.NewSeparator(),
-				container.NewBorder(nil, nil, addrStatusLabel, nil, container.NewCenter(refreshBtn)),
+				addrStatusLabel,
 				widget.NewSeparator(),
 				concentrationWarning,
 			),
