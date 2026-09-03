@@ -43,6 +43,10 @@ var (
 	// qgMuted is --muted: rgba(240,239,255,0.45).
 	qgMuted = color.NRGBA{R: 0xF0, G: 0xEF, B: 0xFF, A: 0x73}
 
+	// qgFundedSelectText is a restrained grey-blue for the dense FUNDED
+	// address-and-balance selector in Send.
+	qgFundedSelectText = color.NRGBA{R: 0x82, G: 0x8A, B: 0xA3, A: 0xff}
+
 	// qgFaint is below --muted, for retired rows and disabled labels.
 	qgFaint = color.NRGBA{R: 0xF0, G: 0xEF, B: 0xFF, A: 0x40}
 
@@ -248,6 +252,26 @@ const addressListRowHeight float32 = 20
 // address ledger only. Bold requests are ignored so the pool stays non-bold.
 type qogeAddressListTheme struct {
 	fyne.Theme
+}
+
+// qogeFundedSelectTheme gives only the Send From selector a quieter,
+// denser text treatment. Other selects retain the application theme.
+type qogeFundedSelectTheme struct {
+	fyne.Theme
+}
+
+func (t qogeFundedSelectTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	if name == theme.ColorNameForeground || name == theme.ColorNamePlaceHolder {
+		return qgFundedSelectText
+	}
+	return t.Theme.Color(name, variant)
+}
+
+func (t qogeFundedSelectTheme) Size(name fyne.ThemeSizeName) float32 {
+	if name == theme.SizeNameText {
+		return 11
+	}
+	return t.Theme.Size(name)
 }
 
 func (t qogeAddressListTheme) Size(name fyne.ThemeSizeName) float32 {

@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	fynetest "fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/btcsuite/btcutil/base58"
@@ -147,6 +148,40 @@ func TestResolveSendDestinationKeepsWalletAndExternalModesSeparate(t *testing.T)
 	}
 	if _, _, err := resolveSendDestination(true, walletAddr, ""); err == nil {
 		t.Fatal("external mode fell back to the selected wallet address")
+	}
+}
+
+func TestSendFromOptionDisplaysBalanceAndResolvesRawAddress(t *testing.T) {
+	const address = "bq1zexample"
+	option := formatSendFromOption(address, 525_000_000, true)
+	if want := address + "  —  5.25000000 QOGE"; option != want {
+		t.Fatalf("formatSendFromOption() = %q, want %q", option, want)
+	}
+
+	optionAddresses := map[string]string{option: address}
+	got, ok := resolveSendFromOption(option, optionAddresses)
+	if !ok || got != address {
+		t.Fatalf("resolveSendFromOption() = %q, %v; want %q, true", got, ok, address)
+	}
+	if got, ok := resolveSendFromOption(address, optionAddresses); ok || got != "" {
+		t.Fatalf("raw address bypass resolved as %q, %v; want empty, false", got, ok)
+	}
+}
+
+func TestSendFromOptionReportsUnavailableBalance(t *testing.T) {
+	const address = "bq1zexample"
+	if got, want := formatSendFromOption(address, 0, false), address+"  —  balance unavailable"; got != want {
+		t.Fatalf("formatSendFromOption() = %q, want %q", got, want)
+	}
+}
+
+func TestFundedSelectThemeUsesSmallerGreyBlueText(t *testing.T) {
+	themeOverride := qogeFundedSelectTheme{Theme: NewQogeTheme()}
+	if got := themeOverride.Color(theme.ColorNameForeground, theme.VariantDark); got != qgFundedSelectText {
+		t.Fatalf("FUNDED selector foreground = %v, want %v", got, qgFundedSelectText)
+	}
+	if got := themeOverride.Size(theme.SizeNameText); got != 11 {
+		t.Fatalf("FUNDED selector text size = %v, want 11", got)
 	}
 }
 

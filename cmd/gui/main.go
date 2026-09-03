@@ -189,6 +189,18 @@ func resolveSendDestination(external bool, walletAddress, externalAddress string
 	return addr, destination, nil
 }
 
+func formatSendFromOption(address string, balanceSats int64, balanceKnown bool) string {
+	if !balanceKnown {
+		return address + "  —  balance unavailable"
+	}
+	return fmt.Sprintf("%s  —  %s QOGE", address, rpcclient.FormatQOGE(balanceSats))
+}
+
+func resolveSendFromOption(selected string, optionAddresses map[string]string) (string, bool) {
+	address, ok := optionAddresses[selected]
+	return address, ok && address != ""
+}
+
 type broadcastGate struct {
 	approvedHex string
 }
@@ -781,6 +793,8 @@ func main() {
 	// reaches one on-chain confirmation.
 
 	sendFromSelect := widget.NewSelect(nil, nil)
+	sendFromOptionAddresses := make(map[string]string)
+	sendFromSelectStyled := container.NewThemeOverride(sendFromSelect, qogeFundedSelectTheme{Theme: NewQogeTheme()})
 
 	sendToSelect := widget.NewSelect(nil, nil)
 
@@ -924,27 +938,62 @@ func main() {
 	// populateSendDropdowns refreshes the From/To dropdowns from the current
 	// wallet state. Called each time the Preview button is clicked so the
 	// lists stay accurate.
-	populateSendDropdowns := func() {
+	populateSendDropdowns := func() error {
 		if wlt == nil {
-			return
+			return nil
 		}
 		infos, err := wlt.ListAddresses()
 		if err != nil {
-			return
+			return err
 		}
-		var funded, fresh []string
+		var fundedAddresses, fresh []string
 		for _, info := range infos {
 			switch info.State {
 			case keystore.StateFunded:
-				funded = append(funded, info.Address)
+				fundedAddresses = append(fundedAddresses, info.Address)
 			case keystore.StateFresh:
 				if !info.Reserved {
 					fresh = append(fresh, info.Address)
 				}
 			}
 		}
-		sendFromSelect.Options = funded
-		if len(funded) == 0 {
+
+		var balances map[string]int64
+		var balanceErr error
+		if rpc != nil && len(fundedAddresses) > 0 {
+			descriptors := make([]string, len(fundedAddresses))
+			for i, address := range fundedAddresses {
+				descriptors[i] = "addr(" + address + ")"
+			}
+			result, err := rpc.ScanTxOutSet(context.Background(), descriptors)
+			if err != nil {
+				balanceErr = fmt.Errorf("FUNDED balance lookup failed: %w", err)
+			} else {
+				balances, balanceErr = rpcclient.AggregateBalances(result, fundedAddresses)
+				if balanceErr != nil {
+					balanceErr = fmt.Errorf("FUNDED balance aggregation failed: %w", balanceErr)
+				}
+			}
+		}
+
+		previousAddress, _ := resolveSendFromOption(sendFromSelect.Selected, sendFromOptionAddresses)
+		fundedOptions := make([]string, 0, len(fundedAddresses))
+		newOptionAddresses := make(map[string]string, len(fundedAddresses))
+		selectedOption := ""
+		for _, address := range fundedAddresses {
+			balanceSats, balanceKnown := balances[address]
+			option := formatSendFromOption(address, balanceSats, balanceKnown)
+			fundedOptions = append(fundedOptions, option)
+			newOptionAddresses[option] = address
+			if address == previousAddress {
+				selectedOption = option
+			}
+		}
+		sendFromOptionAddresses = newOptionAddresses
+		sendFromSelect.Options = fundedOptions
+		if selectedOption != "" {
+			sendFromSelect.Selected = selectedOption
+		} else {
 			sendFromSelect.Selected = ""
 		}
 		sendFromSelect.Refresh()
@@ -954,6 +1003,7 @@ func main() {
 			sendToSelect.Selected = ""
 		}
 		sendToSelect.Refresh()
+		return balanceErr
 	}
 
 	previewBtn := widget.NewButton("Preview Transaction", func() {
@@ -967,10 +1017,12 @@ func main() {
 			return
 		}
 
-		populateSendDropdowns()
+		if err := populateSendDropdowns(); err != nil {
+			sendStatusLabel.SetText(err.Error())
+		}
 
-		fromAddr := sendFromSelect.Selected
-		if fromAddr == "" {
+		fromAddr, selected := resolveSendFromOption(sendFromSelect.Selected, sendFromOptionAddresses)
+		if !selected {
 			sendStatusLabel.SetText("Select a From address (FUNDED).")
 			return
 		}
@@ -1196,7 +1248,10 @@ func main() {
 			sendStatusLabel.SetText("Open a wallet first.")
 			return
 		}
-		populateSendDropdowns()
+		if err := populateSendDropdowns(); err != nil {
+			sendStatusLabel.SetText(err.Error())
+			return
+		}
 		sendStatusLabel.SetText("Address lists refreshed.")
 	}
 	refreshSendBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), refreshSendAddresses)
@@ -1208,7 +1263,7 @@ func main() {
 			pageTitle("Send"),
 			pageIntro("Spend from a FUNDED address after 20 confirmations. Preview freezes the destination before signing."),
 			widget.NewLabel("From address: (FUNDED - spendable after 20 confirmations)"),
-			container.NewBorder(nil, nil, nil, container.NewCenter(refreshSendBtn), sendFromSelect),
+			container.NewBorder(nil, nil, nil, container.NewCenter(refreshSendBtn), sendFromSelectStyled),
 			widget.NewLabel("Destination mode:"),
 			recipientMode,
 			internalToLabel,
