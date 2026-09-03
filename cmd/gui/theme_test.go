@@ -37,12 +37,16 @@ func colorNRGBA(t *testing.T, c color.Color) color.NRGBA {
 
 func TestQogeThemeStaysDarkAndUsesBrandMagenta(t *testing.T) {
 	th := NewQogeTheme()
-	want := color.NRGBA{R: 0xD4, G: 0x00, B: 0xFF, A: 0xff}
-	if got := colorNRGBA(t, th.Color(theme.ColorNamePrimary, theme.VariantLight)); got != want {
-		t.Fatalf("primary (light variant) = %#v, want %#v", got, want)
+	wantMagenta := color.NRGBA{R: 0xD4, G: 0x00, B: 0xFF, A: 0xff}
+	if got := colorNRGBA(t, th.Color(theme.ColorNamePrimary, theme.VariantLight)); got != wantMagenta {
+		t.Fatalf("primary (light variant) = %#v, want %#v", got, wantMagenta)
 	}
-	if got := colorNRGBA(t, th.Color(theme.ColorNamePrimary, theme.VariantDark)); got != want {
-		t.Fatalf("primary (dark variant) = %#v, want %#v", got, want)
+	if got := colorNRGBA(t, th.Color(theme.ColorNamePrimary, theme.VariantDark)); got != wantMagenta {
+		t.Fatalf("primary (dark variant) = %#v, want %#v", got, wantMagenta)
+	}
+	wantText := color.NRGBA{R: 0x82, G: 0x8A, B: 0xA3, A: 0xff}
+	if got := colorNRGBA(t, th.Color(theme.ColorNameForeground, theme.VariantDark)); got != wantText {
+		t.Fatalf("foreground = %#v, want %#v", got, wantText)
 	}
 }
 

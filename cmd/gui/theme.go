@@ -37,15 +37,15 @@ var (
 	// controls stay visible on the flat field without competing with magenta.
 	qgSurfaceHi = color.NRGBA{R: 0x24, G: 0x24, B: 0x3A, A: 0xff}
 
-	// qgText is --text: near-white with a cool lavender undertone.
-	qgText = color.NRGBA{R: 0xF0, G: 0xEF, B: 0xFF, A: 0xff}
+	// qgText is the global foreground: a restrained dark grey-blue.
+	qgText = color.NRGBA{R: 0x82, G: 0x8A, B: 0xA3, A: 0xff}
 
 	// qgMuted is --muted: rgba(240,239,255,0.45).
 	qgMuted = color.NRGBA{R: 0xF0, G: 0xEF, B: 0xFF, A: 0x73}
 
 	// qgFundedSelectText is a restrained grey-blue for the dense FUNDED
 	// address-and-balance selector in Send.
-	qgFundedSelectText = color.NRGBA{R: 0x82, G: 0x8A, B: 0xA3, A: 0xff}
+	qgFundedSelectText = qgText
 
 	// qgFaint is below --muted, for retired rows and disabled labels.
 	qgFaint = color.NRGBA{R: 0xF0, G: 0xEF, B: 0xFF, A: 0x40}
