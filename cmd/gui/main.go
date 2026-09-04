@@ -942,7 +942,7 @@ func main() {
 	broadcastBtn.Importance = widget.DangerImportance
 	broadcastGate.Reset(broadcastBtn)
 
-	testMempoolBtn := widget.NewButton("Test in Mempool (testmempoolaccept)", func() {
+	testMempoolBtn := widget.NewButton("Test Transaction", func() {
 		broadcastGate.Reset(broadcastBtn)
 		if signedTxHex == "" {
 			sendStatusLabel.SetText("No signed transaction — preview and sign first.")
@@ -966,6 +966,7 @@ func main() {
 				"testmempoolaccept: REJECTED  reason: %s", result.RejectReason))
 		}
 	})
+	testMempoolBtn.Importance = widget.SuccessImportance
 
 	broadcastBtn.OnTapped = func() {
 		if !broadcastGate.Allows(signedTxHex) || broadcastContext.rawHex != signedTxHex {
@@ -1344,6 +1345,18 @@ func main() {
 	refreshSendBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), refreshSendAddresses)
 	refreshSendBtn.Importance = widget.LowImportance
 	refreshSendSpacer := container.NewGridWrap(refreshSendBtn.MinSize(), layout.NewSpacer())
+	nextStepToTest := widget.NewLabel("step 2")
+	nextStepToTest.TextStyle = fyne.TextStyle{Italic: true}
+	nextStepToBroadcast := widget.NewLabel("step 3")
+	nextStepToBroadcast.TextStyle = fyne.TextStyle{Italic: true}
+	transactionActionRow := container.NewHBox(
+		amountField,
+		previewBtn,
+		nextStepToTest,
+		testMempoolBtn,
+		nextStepToBroadcast,
+		broadcastBtn,
+	)
 
 	sendTab = container.NewTabItem("Send",
 		scrollPage(
@@ -1359,14 +1372,12 @@ func main() {
 			externalToEntry,
 			externalValidationLabel,
 			widget.NewLabel("Amount (QOGE):"),
-			container.NewHBox(amountField, previewBtn),
+			transactionActionRow,
 			widget.NewLabel("Fee: 0.0001 QOGE (fixed)"),
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex:"),
 			rawHexPreviewLabel,
 			container.NewCenter(copyTxHexBtn),
-			container.NewCenter(testMempoolBtn),
-			container.NewCenter(broadcastBtn),
 			widget.NewSeparator(),
 			sendStatusLabel,
 		),
