@@ -188,11 +188,12 @@ func TestFundedSelectThemeUsesSmallerGreyBlueText(t *testing.T) {
 func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
+	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
 
-	tabs := newMainTabs(walletTab, addressesTab, sendTab, networkTab)
-	wantOrder := []string{"Wallet", "My Addresses", "Send", "Network"}
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
+	wantOrder := []string{"Wallet", "My Addresses", "Transactions", "Send", "Network"}
 	if len(tabs.Items) != len(wantOrder) {
 		t.Fatalf("tab count = %d, want %d", len(tabs.Items), len(wantOrder))
 	}
@@ -204,7 +205,7 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	if walletTab.Disabled() || networkTab.Disabled() {
 		t.Fatal("Wallet and Network must be available before a wallet is loaded")
 	}
-	for _, item := range []*container.TabItem{addressesTab, sendTab} {
+	for _, item := range []*container.TabItem{addressesTab, transactionsTab, sendTab} {
 		if !item.Disabled() {
 			t.Fatalf("%s tab enabled before wallet load", item.Text)
 		}
@@ -221,19 +222,20 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
+	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
-	tabs := newMainTabs(walletTab, addressesTab, sendTab, networkTab)
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
 	w := fynetest.NewWindow(tabs)
 	defer w.Close()
 	w.SetPadded(false)
-	w.Resize(fyne.NewSize(620, 120))
+	w.Resize(fyne.NewSize(1400, 120))
 
 	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(130, 10))
 	if tabs.Selected() != walletTab {
 		t.Fatalf("clicking disabled My Addresses selected %q, want Wallet", tabs.Selected().Text)
 	}
-	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(300, 10))
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(420, 10))
 	if tabs.Selected() != networkTab {
 		t.Fatalf("clicking enabled Network selected %q, want Network", tabs.Selected().Text)
 	}
@@ -286,6 +288,35 @@ func TestBroadcastGateRequiresAllowedCurrentTransaction(t *testing.T) {
 	gate.Reset(button) // Preview/re-sign starts a new transaction cycle.
 	if !button.Disabled() || gate.Allows("tx-a") || gate.Allows("tx-b") {
 		t.Fatal("new preview/sign cycle did not clear broadcast approval")
+	}
+}
+
+func TestBroadcastAndRecordOnlyRecordsSuccessfulBroadcast(t *testing.T) {
+	var recorded []string
+	txid, historyErr, err := broadcastAndRecord(
+		func() (string, error) { return "real-txid", nil },
+		func(txid string) error { recorded = append(recorded, txid); return nil },
+	)
+	if err != nil || historyErr != nil || txid != "real-txid" || len(recorded) != 1 || recorded[0] != txid {
+		t.Fatalf("successful broadcast result: txid=%q historyErr=%v err=%v recorded=%v", txid, historyErr, err, recorded)
+	}
+
+	recorded = nil
+	_, _, err = broadcastAndRecord(
+		func() (string, error) { return "", errors.New("rejected") },
+		func(txid string) error { recorded = append(recorded, txid); return nil },
+	)
+	if err == nil || len(recorded) != 0 {
+		t.Fatalf("failed broadcast err=%v recorded=%v; want error and no record", err, recorded)
+	}
+
+	historyFailure := errors.New("disk full")
+	txid, historyErr, err = broadcastAndRecord(
+		func() (string, error) { return "broadcast-txid", nil },
+		func(string) error { return historyFailure },
+	)
+	if err != nil || !errors.Is(historyErr, historyFailure) || txid != "broadcast-txid" {
+		t.Fatalf("history failure invalidated broadcast: txid=%q historyErr=%v err=%v", txid, historyErr, err)
 	}
 }
 

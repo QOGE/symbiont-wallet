@@ -130,7 +130,7 @@ func Open(dbPath string, seed []byte) (*KeyIndex, error) {
 	// Initialise buckets and reject old records rather than interpreting their
 	// numeric state values under the new five-state lifecycle.
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, bkt := range [][]byte{bucketAddresses, bucketMeta} {
+		for _, bkt := range [][]byte{bucketAddresses, bucketMeta, bucketTransactions} {
 			if _, err := tx.CreateBucketIfNotExists(bkt); err != nil {
 				return err
 			}

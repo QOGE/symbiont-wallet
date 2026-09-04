@@ -1,6 +1,6 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
-// Four tabs: Wallet lifecycle, My Addresses generation/state tracking, Send
+// Five tabs: Wallet lifecycle, address state tracking, local transaction history,
 // transaction construction, and Network RPC setup.
 package main
 
@@ -224,14 +224,25 @@ func (g *broadcastGate) Allows(rawHex string) bool {
 
 type signedBroadcastContext struct {
 	rawHex          string
+	source          string
 	destination     string
 	destinationType qogeaddress.DestinationType
 	amountSats      int64
+	feeSats         int64
 }
 
-func newMainTabs(walletTab, addressesTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
-	tabs := container.NewAppTabs(walletTab, addressesTab, sendTab, networkTab)
+func broadcastAndRecord(send func() (string, error), record func(string) error) (txid string, historyErr error, err error) {
+	txid, err = send()
+	if err != nil {
+		return "", nil, err
+	}
+	return txid, record(txid), nil
+}
+
+func newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
+	tabs := container.NewAppTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
 	tabs.DisableItem(addressesTab)
+	tabs.DisableItem(transactionsTab)
 	tabs.DisableItem(sendTab)
 	return tabs
 }
@@ -273,9 +284,10 @@ func main() {
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
-	var addressesTab, sendTab *container.TabItem
+	var addressesTab, transactionsTab, sendTab *container.TabItem
 	var rpcFooterStatus *widget.Label
-	var addressesNavBtn, sendNavBtn *widget.Button
+	var renderTransactions func()
+	var addressesNavBtn, transactionsNavBtn, sendNavBtn *widget.Button
 
 	// ── Wallet tab ──────────────────────────────────────────────────────────────
 
@@ -362,6 +374,7 @@ func main() {
 		wlt = newWallet
 		if tabs != nil {
 			tabs.EnableItem(addressesTab)
+			tabs.EnableItem(transactionsTab)
 			tabs.EnableItem(sendTab)
 		}
 		if addressesNavBtn != nil {
@@ -369,6 +382,12 @@ func main() {
 		}
 		if sendNavBtn != nil {
 			sendNavBtn.Enable()
+		}
+		if transactionsNavBtn != nil {
+			transactionsNavBtn.Enable()
+		}
+		if renderTransactions != nil {
+			renderTransactions()
 		}
 		if create {
 			walletStatus.SetText("New wallet created.")
@@ -670,12 +689,20 @@ func main() {
 						}
 					}
 					funding, fundingErr := rpcclient.AnalyzeFunding(result, freshAddrs)
+					deposits, depositErr := rpcclient.AnalyzeDeposits(result, freshAddrs)
 					if fundingErr != nil {
 						balanceErr = fmt.Sprintf("Funding analysis error: %v", fundingErr)
+					} else if depositErr != nil {
+						balanceErr = fmt.Sprintf("Deposit analysis error: %v", depositErr)
 					} else {
+						observedAt := time.Now().UTC()
 						for _, addr := range freshAddrs {
 							fs := funding[addr]
-							changed, observeErr := wlt.ObserveFunding(addr, fs.BalanceSats, fs.Confirmations)
+							incoming := make([]wallet.IncomingDeposit, 0, len(deposits[addr]))
+							for _, deposit := range deposits[addr] {
+								incoming = append(incoming, wallet.IncomingDeposit{TxID: deposit.TxID, AmountSats: deposit.AmountSats})
+							}
+							changed, observeErr := wlt.ObserveFundingWithHistory(addr, fs.BalanceSats, fs.Confirmations, incoming, observedAt)
 							if observeErr != nil {
 								balanceErr = fmt.Sprintf("Funding state update failed: %v", observeErr)
 								break
@@ -756,6 +783,9 @@ func main() {
 		}
 		hasAddressSnapshot = true
 		renderAddressList()
+		if renderTransactions != nil {
+			renderTransactions()
+		}
 	})
 	refreshBtn.Importance = widget.LowImportance
 	refreshBtn.IconPlacement = widget.ButtonIconTrailingText
@@ -779,7 +809,52 @@ func main() {
 		),
 	)
 
-	// ── Send tab ───────────────────────────────────────────────────────────
+	// ── Transactions tab ───────────────────────────────────────────────────
+
+	historyList := container.NewVBox()
+	historyScroll := container.NewVScroll(historyList)
+	historyScroll.SetMinSize(fyne.NewSize(0, 120))
+	historyStatus := widget.NewLabel("Transaction history is stored locally in this wallet.")
+	historyStatus.Wrapping = fyne.TextWrapWord
+	renderTransactions = func() {
+		if wlt == nil {
+			return
+		}
+		records, err := wlt.ListTransactions()
+		if err != nil {
+			historyStatus.SetText(fmt.Sprintf("History read failed: %v", err))
+			return
+		}
+		historyList.RemoveAll()
+		if len(records) == 0 {
+			historyList.Add(widget.NewLabel("No recorded transactions yet."))
+		}
+		for _, record := range records {
+			record := record
+			copyTxID := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+				w.Clipboard().SetContent(record.TxID)
+				historyStatus.SetText("Transaction ID copied to clipboard.")
+			})
+			copyTxID.Importance = widget.LowImportance
+			txid := widget.NewLabel(record.TxID)
+			txid.TextStyle = fyne.TextStyle{Monospace: true}
+			txid.Wrapping = fyne.TextWrapBreak
+			var details string
+			if record.Direction == wallet.TransactionOutgoing {
+				details = fmt.Sprintf("OUTGOING\nFrom: %s\nTo: %s (%s)\nAmount: %s QOGE\nFee: %s QOGE\nBroadcast by this wallet: %s", record.SourceAddress, record.Destination, record.DestinationType, rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.RecordedAt.Local().Format(time.RFC3339))
+			} else {
+				details = fmt.Sprintf("INCOMING\nReceived at: %s\nAmount: %s QOGE\nFirst recorded as FUNDED by Refresh: %s", record.Destination, rpcclient.FormatQOGE(record.AmountSats), record.RecordedAt.Local().Format(time.RFC3339))
+			}
+			historyList.Add(widget.NewCard("", "", container.NewVBox(widget.NewLabel(details), container.NewBorder(nil, nil, nil, copyTxID, txid))))
+		}
+		historyList.Refresh()
+		historyStatus.SetText(fmt.Sprintf("%d recorded transaction(s), newest first. Confirmation status is not tracked here.", len(records)))
+	}
+	refreshHistoryBtn := widget.NewButtonWithIcon("Refresh history", theme.ViewRefreshIcon(), renderTransactions)
+	refreshHistoryBtn.Importance = widget.LowImportance
+	transactionsTab = container.NewTabItem("Transactions", container.NewBorder(container.NewVBox(pageTitle("Transactions"), pageIntro("Local write-once history anchored by transaction ID. Internal change is excluded."), container.NewCenter(refreshHistoryBtn)), historyStatus, nil, nil, historyScroll))
+
+	// ── Send tab ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 	//
 	// Flow:
 	//   1. Select From address (must be FUNDED)
@@ -922,13 +997,25 @@ func main() {
 				broadcastGate.Reset(broadcastBtn)
 				return
 			}
-			txid, err := rpc.SendRawTransaction(context.Background(), ctx.rawHex)
+			txid, historyErr, err := broadcastAndRecord(
+				func() (string, error) { return rpc.SendRawTransaction(context.Background(), ctx.rawHex) },
+				func(txid string) error {
+					return wlt.RecordOutgoingTransaction(wallet.OutgoingTransaction{TxID: txid, SourceAddress: ctx.source, Destination: ctx.destination, DestinationType: string(ctx.destinationType), AmountSats: ctx.amountSats, FeeSats: ctx.feeSats, BroadcastAt: time.Now().UTC()})
+				},
+			)
 			if err != nil {
 				sendStatusLabel.SetText(fmt.Sprintf("sendrawtransaction RPC error: %v", err))
 				return
 			}
 			broadcastGate.Reset(broadcastBtn)
-			sendStatusLabel.SetText(fmt.Sprintf("Transaction broadcast successfully.\nTxid: %s", txid))
+			if historyErr != nil {
+				sendStatusLabel.SetText(fmt.Sprintf("Transaction broadcast successfully.\nTxid: %s\nWARNING: local history write failed: %v", txid, historyErr))
+			} else {
+				sendStatusLabel.SetText(fmt.Sprintf("Transaction broadcast successfully.\nTxid: %s", txid))
+				if renderTransactions != nil {
+					renderTransactions()
+				}
+			}
 		}, w)
 		confirm.SetConfirmText("Broadcast Now")
 		confirm.SetConfirmImportance(widget.SuccessImportance)
@@ -1219,7 +1306,7 @@ func main() {
 
 				signedTxHex = hex.EncodeToString(raw)
 				broadcastContext = signedBroadcastContext{
-					rawHex: signedTxHex, destination: toAddr, destinationType: toDestination.Type, amountSats: sendSats,
+					rawHex: signedTxHex, source: fromAddr, destination: toAddr, destinationType: toDestination.Type, amountSats: sendSats, feeSats: feeSats,
 				}
 				// Show a short preview — never render the full 34,528-char string
 				// into a widget (confirmed cause of GUI freeze on real P2QPK tx).
@@ -1287,21 +1374,23 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs = newMainTabs(walletTab, addressesTab, sendTab, networkTab)
+	tabs = newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
 
 	walletNavBtn := widget.NewButtonWithIcon("Wallet", theme.AccountIcon(), nil)
 	addressesNavBtn = widget.NewButtonWithIcon("My Addresses", theme.ListIcon(), nil)
+	transactionsNavBtn = widget.NewButtonWithIcon("Transactions", theme.HistoryIcon(), nil)
 	sendNavBtn = widget.NewButtonWithIcon("Send", theme.MailSendIcon(), nil)
 	networkNavBtn := widget.NewButtonWithIcon("Network", theme.SettingsIcon(), nil)
-	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, sendNavBtn, networkNavBtn}
+	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, transactionsNavBtn, sendNavBtn, networkNavBtn}
 	for _, button := range navButtons {
 		button.Alignment = widget.ButtonAlignLeading
 	}
 	addressesNavBtn.Disable()
+	transactionsNavBtn.Disable()
 	sendNavBtn.Disable()
 
-	pages := []*container.TabItem{walletTab, addressesTab, sendTab, networkTab}
-	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, sendTab.Content, networkTab.Content)
+	pages := []*container.TabItem{walletTab, addressesTab, transactionsTab, sendTab, networkTab}
+	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, transactionsTab.Content, sendTab.Content, networkTab.Content)
 	selectPage := func(selected *container.TabItem, selectedButton *widget.Button) {
 		tabs.Select(selected)
 		for i, page := range pages {
@@ -1319,6 +1408,7 @@ func main() {
 	}
 	walletNavBtn.OnTapped = func() { selectPage(walletTab, walletNavBtn) }
 	addressesNavBtn.OnTapped = func() { selectPage(addressesTab, addressesNavBtn) }
+	transactionsNavBtn.OnTapped = func() { selectPage(transactionsTab, transactionsNavBtn) }
 	sendNavBtn.OnTapped = func() { selectPage(sendTab, sendNavBtn) }
 	networkNavBtn.OnTapped = func() { selectPage(networkTab, networkNavBtn) }
 	selectPage(walletTab, walletNavBtn)
@@ -1332,6 +1422,7 @@ func main() {
 		widget.NewSeparator(),
 		navItem(walletNavBtn),
 		navItem(addressesNavBtn),
+		navItem(transactionsNavBtn),
 		navItem(sendNavBtn),
 		navItem(networkNavBtn),
 	)
