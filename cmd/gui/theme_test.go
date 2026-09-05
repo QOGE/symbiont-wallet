@@ -68,6 +68,64 @@ func TestQogeThemeUsesFlatCanvas(t *testing.T) {
 	}
 }
 
+func TestQogeLightThemeUsesLightAppropriateRoles(t *testing.T) {
+	th := NewQogeLightTheme()
+	wants := map[fyne.ThemeColorName]color.NRGBA{
+		theme.ColorNameBackground:          qogeLightPalette.bg,
+		theme.ColorNameOverlayBackground:   qogeLightPalette.surface,
+		theme.ColorNameMenuBackground:      qogeLightPalette.surface,
+		theme.ColorNameHeaderBackground:    qogeLightPalette.surface,
+		theme.ColorNameInputBackground:     qogeLightPalette.surfaceHi,
+		theme.ColorNameButton:              qogeLightPalette.surfaceHi,
+		theme.ColorNameDisabledButton:      qogeLightPalette.disabledButton,
+		theme.ColorNameForeground:          qogeLightPalette.text,
+		theme.ColorNamePlaceHolder:         qogeLightPalette.muted,
+		theme.ColorNameDisabled:            qogeLightPalette.faint,
+		theme.ColorNamePrimary:             qogeLightPalette.magenta,
+		theme.ColorNameForegroundOnPrimary: qogeLightPalette.onMagenta,
+		theme.ColorNameSeparator:           qogeLightPalette.border,
+		theme.ColorNameInputBorder:         qogeLightPalette.border,
+		theme.ColorNameSuccess:             qogeLightPalette.funded,
+		theme.ColorNameWarning:             qogeLightPalette.pending,
+		theme.ColorNameError:               qogeLightPalette.danger,
+		theme.ColorNameHyperlink:           qogeLightPalette.fresh,
+		theme.ColorNameHover:               qogeLightPalette.hover,
+		theme.ColorNamePressed:             qogeLightPalette.pressed,
+		theme.ColorNameFocus:               qogeLightPalette.focus,
+		theme.ColorNameSelection:           qogeLightPalette.focus,
+		theme.ColorNameScrollBar:           qogeLightPalette.scrollBar,
+		theme.ColorNameScrollBarBackground: qogeLightPalette.bg,
+		theme.ColorNameShadow:              qogeLightPalette.shadow,
+	}
+	for name, want := range wants {
+		if got := colorNRGBA(t, th.Color(name, theme.VariantDark)); got != want {
+			t.Fatalf("light %s = %#v, want %#v", name, got, want)
+		}
+	}
+}
+
+func TestSetQogeThemeSwitchesWidgetsAndAdaptiveCanvasColours(t *testing.T) {
+	a := fynetest.NewApp()
+	defer a.Quit()
+	defer qogeLightActive.Store(false)
+
+	setQogeTheme(a, true)
+	if got := colorNRGBA(t, a.Settings().Theme().Color(theme.ColorNameBackground, theme.VariantDark)); got != qogeLightPalette.bg {
+		t.Fatalf("active light background = %#v, want %#v", got, qogeLightPalette.bg)
+	}
+	if got := color.NRGBAModel.Convert(qgDisplayText).(color.NRGBA); got != qogeLightPalette.text {
+		t.Fatalf("adaptive light canvas text = %#v, want %#v", got, qogeLightPalette.text)
+	}
+
+	setQogeTheme(a, false)
+	if got := colorNRGBA(t, a.Settings().Theme().Color(theme.ColorNameBackground, theme.VariantLight)); got != qogeDarkPalette.bg {
+		t.Fatalf("active dark background = %#v, want %#v", got, qogeDarkPalette.bg)
+	}
+	if got := color.NRGBAModel.Convert(qgDisplayText).(color.NRGBA); got != qogeDarkPalette.text {
+		t.Fatalf("adaptive dark canvas text = %#v, want %#v", got, qogeDarkPalette.text)
+	}
+}
+
 func TestAddressListThemeUsesCustomSpacing(t *testing.T) {
 	th := qogeAddressListTheme{Theme: NewQogeTheme()}
 	if got := th.Size(theme.SizeNamePadding); got != addressListSpacing {

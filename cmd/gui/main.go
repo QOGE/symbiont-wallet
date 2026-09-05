@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,9 +276,63 @@ func equalWidthButtons(buttons ...*widget.Button) []fyne.CanvasObject {
 	return wrapped
 }
 
+type themeToggle struct {
+	*fyne.Container
+	sunButton  *widget.Button
+	moonButton *widget.Button
+	light      bool
+}
+
+func newThemeToggle(a fyne.App, changed func()) *themeToggle {
+	toggle := &themeToggle{
+		sunButton:  widget.NewButtonWithIcon("", qogeSunIcon, nil),
+		moonButton: widget.NewButtonWithIcon("", qogeMoonIcon, nil),
+	}
+	toggle.sunButton.Importance = widget.LowImportance
+	toggle.moonButton.Importance = widget.HighImportance
+
+	setLight := func(light bool) {
+		if toggle.light == light {
+			return
+		}
+		toggle.light = light
+		setQogeTheme(a, light)
+		if light {
+			toggle.sunButton.Importance = widget.HighImportance
+			toggle.moonButton.Importance = widget.LowImportance
+		} else {
+			toggle.sunButton.Importance = widget.LowImportance
+			toggle.moonButton.Importance = widget.HighImportance
+		}
+		toggle.sunButton.Refresh()
+		toggle.moonButton.Refresh()
+		if changed != nil {
+			changed()
+		}
+	}
+	toggle.sunButton.OnTapped = func() { setLight(true) }
+	toggle.moonButton.OnTapped = func() { setLight(false) }
+
+	outline := canvas.NewRectangle(color.Transparent)
+	outline.StrokeColor = qgDisplayToggleEdge
+	outline.StrokeWidth = 1
+	outline.CornerRadius = 8
+	themedSunButton := container.NewThemeOverride(toggle.sunButton,
+		qogeSunToggleTheme{Theme: newActiveQogeTheme()})
+	sunOutline := canvas.NewRectangle(color.Transparent)
+	sunOutline.StrokeColor = qgDisplaySunEdge
+	sunOutline.StrokeWidth = 1
+	sunOutline.CornerRadius = 6
+	sunSegment := container.NewStack(themedSunButton, sunOutline)
+	segments := container.NewGridWithColumns(2, toggle.moonButton, sunSegment)
+	toggle.Container = container.NewStack(outline,
+		container.New(layout.NewCustomPaddedLayout(1, 1, 1, 1), segments))
+	return toggle
+}
+
 func main() {
 	a := app.NewWithID("io.qoge.symbiont-wallet")
-	a.Settings().SetTheme(NewQogeTheme())
+	setQogeTheme(a, false)
 	w := a.NewWindow("Symbiont Wallet")
 	w.Resize(fyne.NewSize(1100, 860))
 
@@ -446,15 +501,15 @@ func main() {
 	// ── My Addresses tab ──────────────────────────────────────────────────────
 
 	addrListBox := container.New(layout.NewCustomPaddedVBoxLayout(addressListSpacing))
-	addrListThemed := container.NewThemeOverride(addrListBox, qogeAddressListTheme{Theme: NewQogeTheme()})
+	addrListThemed := container.NewThemeOverride(addrListBox, qogeAddressListTheme{Theme: newActiveQogeTheme()})
 	addrListScroll := container.NewVScroll(addrListThemed)
 	addrListScroll.SetMinSize(fyne.NewSize(0, 120))
 
 	addrStatusLabel := widget.NewLabel("Press Refresh to see your addresses.")
 	addrStatusLabel.Wrapping = fyne.TextWrapWord
-	spendableSummary, spendableCard := newSummaryCard("Spendable", "FUNDED", QGStateFunded)
-	pendingSummary, pendingCard := newSummaryCard("Pending", "SPEND_PENDING", QGStatePending)
-	addressCountSummary, addressCountCard := newSummaryCard("Addresses", "Total", QGStateFresh)
+	spendableSummary, spendableCard := newSummaryCard("Spendable", "FUNDED", QGDisplayFunded)
+	pendingSummary, pendingCard := newSummaryCard("Pending", "SPEND_PENDING", QGDisplayPending)
+	addressCountSummary, addressCountCard := newSummaryCard("Addresses", "Total", QGDisplayFresh)
 	addressSummaryCards := container.NewGridWithColumns(3, spendableCard, pendingCard, addressCountCard)
 
 	type addressRenderState struct {
@@ -517,18 +572,18 @@ func main() {
 				}
 			}
 
-			stateColor := QGStateFresh
+			stateColor := QGDisplayFresh
 			switch info.State {
 			case keystore.StateFunded:
-				stateColor = QGStateFunded
+				stateColor = QGDisplayFunded
 			case keystore.StateSpendPending:
-				stateColor = QGStatePending
+				stateColor = QGDisplayPending
 			case keystore.StateSpent:
-				stateColor = QGStateSpent
+				stateColor = QGDisplaySpent
 			case keystore.StateRetired:
-				stateColor = QGStateRetired
+				stateColor = QGDisplayRetired
 			}
-			chipBackground := canvas.NewRectangle(QGStateTint(stateColor))
+			chipBackground := canvas.NewRectangle(adaptiveTint(stateColor, 0x28, 0x18))
 			chipBackground.CornerRadius = 8
 			chipLabel := canvas.NewText(stateLabel, stateColor)
 			chipLabel.TextSize = addressListTextSize
@@ -536,17 +591,17 @@ func main() {
 			chip := container.NewGridWrap(fyne.NewSize(128, addressListRowHeight),
 				container.NewStack(chipBackground, container.NewCenter(chipLabel)))
 
-			indexText := canvas.NewText(fmt.Sprintf("#%d", info.Index), qgMuted)
+			indexText := canvas.NewText(fmt.Sprintf("#%d", info.Index), qgDisplayMuted)
 			indexText.TextSize = addressListTextSize
 			indexText.FontSource = fontSpaceMonoRegular
 			indexText.Alignment = fyne.TextAlignTrailing
 			index := container.NewGridWrap(fyne.NewSize(addressIndexColWidth, addressListRowHeight), indexText)
 
-			addressText := canvas.NewText(addr, qgMuted)
+			addressText := canvas.NewText(addr, qgDisplayMuted)
 			addressText.TextSize = addressListTextSize
 			addressText.FontSource = fontSpaceMonoRegular
 
-			balanceValue := canvas.NewText(balanceText, qgMuted)
+			balanceValue := canvas.NewText(balanceText, qgDisplayMuted)
 			balanceValue.TextSize = addressListTextSize
 			balanceValue.FontSource = fontSpaceMonoRegular
 
@@ -560,7 +615,7 @@ func main() {
 			row := container.New(layout.NewCustomPaddedHBoxLayout(addressListSpacing),
 				index, chip, addressText, layout.NewSpacer(), balanceValue, copyBtn)
 			row = container.New(layout.NewCustomPaddedLayout(0, 0, 0, addressListRightInset), row)
-			hairline := canvas.NewRectangle(qgBorder)
+			hairline := canvas.NewRectangle(qgDisplayBorder)
 			hairline.SetMinSize(fyne.NewSize(1, 1))
 			addrListBox.Add(container.New(layout.NewCustomPaddedVBoxLayout(0), row, hairline))
 		}
@@ -634,6 +689,12 @@ func main() {
 		updateRPCStatus(rpcFooterStatus, ep, nil)
 	})
 	connectBtn.Importance = widget.HighImportance
+	themeToggleBtn := newThemeToggle(a, func() {
+		if hasAddressSnapshot {
+			renderAddressList()
+		}
+		canvas.Refresh(w.Content())
+	})
 
 	networkTab := container.NewTabItem("Network",
 		scrollPage(
@@ -869,7 +930,7 @@ func main() {
 
 	sendFromSelect := widget.NewSelect(nil, nil)
 	sendFromOptionAddresses := make(map[string]string)
-	sendFromSelectStyled := container.NewThemeOverride(sendFromSelect, qogeFundedSelectTheme{Theme: NewQogeTheme()})
+	sendFromSelectStyled := container.NewThemeOverride(sendFromSelect, qogeFundedSelectTheme{Theme: newActiveQogeTheme()})
 
 	sendToSelect := widget.NewSelect(nil, nil)
 
@@ -1428,7 +1489,7 @@ func main() {
 	navItem := func(btn *widget.Button) fyne.CanvasObject {
 		return container.NewGridWrap(fyne.NewSize(sidebarWidth, 40), btn)
 	}
-	sidebarInner := container.NewVBox(
+	sidebarNavigation := container.NewVBox(
 		container.NewPadded(container.NewVBox(brandWordmark(), brandTagline())),
 		widget.NewSeparator(),
 		navItem(walletNavBtn),
@@ -1437,20 +1498,22 @@ func main() {
 		navItem(sendNavBtn),
 		navItem(networkNavBtn),
 	)
+	themeToggle := container.NewGridWrap(fyne.NewSize(80, 40), themeToggleBtn.Container)
+	sidebarInner := container.NewBorder(nil, container.NewCenter(themeToggle), nil, nil, sidebarNavigation)
 	sidebarRail := container.NewStack(
-		canvas.NewRectangle(qgSidebar),
+		canvas.NewRectangle(qgDisplayBg),
 		container.NewPadded(sidebarInner),
 	)
-	sidebarWithTheme := container.NewThemeOverride(sidebarRail, qogeSidebarTheme{Theme: NewQogeTheme()})
+	sidebarWithTheme := container.NewThemeOverride(sidebarRail, qogeSidebarTheme{Theme: newActiveQogeTheme()})
 	footer := container.NewStack(
-		canvas.NewRectangle(qgBg),
+		canvas.NewRectangle(qgDisplayBg),
 		container.NewVBox(widget.NewSeparator(), rpcFooterStatus),
 	)
 	pageContent := container.New(layout.NewCustomPaddedLayout(12, 12, 16, 16), pageHost)
 	content := container.NewBorder(nil, nil,
 		container.NewHBox(sidebarWithTheme, widget.NewSeparator()),
 		nil, pageContent)
-	contentWithBackground := container.NewStack(canvas.NewRectangle(qgBg), content)
+	contentWithBackground := container.NewStack(canvas.NewRectangle(qgDisplayBg), content)
 	w.SetContent(container.NewBorder(nil, footer, nil, nil, contentWithBackground))
 
 	w.SetCloseIntercept(func() {

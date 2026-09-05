@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,13 +176,62 @@ func TestSendFromOptionReportsUnavailableBalance(t *testing.T) {
 	}
 }
 
-func TestFundedSelectThemeUsesSmallerGreyBlueText(t *testing.T) {
-	themeOverride := qogeFundedSelectTheme{Theme: NewQogeTheme()}
-	if got := themeOverride.Color(theme.ColorNameForeground, theme.VariantDark); got != qgFundedSelectText {
-		t.Fatalf("FUNDED selector foreground = %v, want %v", got, qgFundedSelectText)
+func TestFundedSelectThemeUsesSmallerActiveThemeText(t *testing.T) {
+	darkOverride := qogeFundedSelectTheme{Theme: NewQogeTheme()}
+	if got := darkOverride.Color(theme.ColorNameForeground, theme.VariantDark); got != qogeDarkPalette.text {
+		t.Fatalf("dark FUNDED selector foreground = %v, want %v", got, qogeDarkPalette.text)
 	}
-	if got := themeOverride.Size(theme.SizeNameText); got != 11 {
+	lightOverride := qogeFundedSelectTheme{Theme: NewQogeLightTheme()}
+	if got := lightOverride.Color(theme.ColorNameForeground, theme.VariantLight); got != qogeLightPalette.text {
+		t.Fatalf("light FUNDED selector foreground = %v, want %v", got, qogeLightPalette.text)
+	}
+	if got := darkOverride.Size(theme.SizeNameText); got != 11 {
 		t.Fatalf("FUNDED selector text size = %v, want 11", got)
+	}
+}
+
+func TestThemeToggleKeepsIconAndThemeStateInSync(t *testing.T) {
+	a := fynetest.NewApp()
+	defer a.Quit()
+	defer qogeLightActive.Store(false)
+
+	setQogeTheme(a, false)
+	toggle := newThemeToggle(a, nil)
+	if toggle.moonButton.Icon.Name() != qogeMoonIcon.Name() || toggle.sunButton.Icon.Name() != qogeSunIcon.Name() {
+		t.Fatalf("toggle must always show moon %q and sun %q", qogeMoonIcon.Name(), qogeSunIcon.Name())
+	}
+	if toggle.moonButton.Importance != widget.HighImportance || toggle.sunButton.Importance != widget.LowImportance {
+		t.Fatal("dark toggle must initially select the moon segment")
+	}
+
+	toggle.sunButton.Tapped(nil)
+	if toggle.sunButton.Importance != widget.HighImportance || toggle.moonButton.Importance != widget.LowImportance {
+		t.Fatal("light toggle must select the sun segment")
+	}
+	if got := colorNRGBA(t, a.Settings().Theme().Color(theme.ColorNameBackground, theme.VariantDark)); got != qogeLightPalette.bg {
+		t.Fatalf("toggle light background = %#v, want %#v", got, qogeLightPalette.bg)
+	}
+	sunTheme := qogeSunToggleTheme{Theme: newActiveQogeTheme()}
+	wantSunBackground := color.NRGBA{}
+	if got := colorNRGBA(t, sunTheme.Color(theme.ColorNamePrimary, theme.VariantLight)); got != wantSunBackground {
+		t.Fatalf("light sun background = %#v, want %#v", got, wantSunBackground)
+	}
+	if got := colorNRGBA(t, sunTheme.Color(theme.ColorNameForegroundOnPrimary, theme.VariantLight)); got != qogeLightPalette.border {
+		t.Fatalf("light sun foreground = %#v, want border grey %#v", got, qogeLightPalette.border)
+	}
+	if got := color.NRGBAModel.Convert(qgDisplaySunEdge).(color.NRGBA); got != qogeLightPalette.border {
+		t.Fatalf("light sun border = %#v, want border grey %#v", got, qogeLightPalette.border)
+	}
+	if got := color.NRGBAModel.Convert(qgDisplayToggleEdge).(color.NRGBA); got != qogeLightPalette.border {
+		t.Fatalf("light toggle border = %#v, want border grey %#v", got, qogeLightPalette.border)
+	}
+
+	toggle.moonButton.Tapped(nil)
+	if toggle.moonButton.Importance != widget.HighImportance || toggle.sunButton.Importance != widget.LowImportance {
+		t.Fatal("dark toggle must select the moon segment")
+	}
+	if got := colorNRGBA(t, a.Settings().Theme().Color(theme.ColorNameBackground, theme.VariantLight)); got != qogeDarkPalette.bg {
+		t.Fatalf("toggle dark background = %#v, want %#v", got, qogeDarkPalette.bg)
 	}
 }
 
