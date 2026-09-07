@@ -1420,11 +1420,9 @@ func main() {
 	sendTab = container.NewTabItem("Send",
 		scrollPage(
 			pageTitle("Send"),
-			pageIntro("Spend from a FUNDED address after 20 confirmations. Preview freezes the destination before signing."),
 			widget.NewLabel("From address: (FUNDED - spendable after 20 confirmations)"),
 			container.NewBorder(nil, nil, nil, container.NewCenter(refreshSendBtn), sendFromSelectStyled),
-			widget.NewLabel("Destination mode:"),
-			recipientMode,
+			container.NewHBox(widget.NewLabel("Destination mode:"), recipientMode),
 			internalToLabel,
 			container.NewBorder(nil, nil, nil, refreshSendSpacer, sendToSelect),
 			externalToLabel,

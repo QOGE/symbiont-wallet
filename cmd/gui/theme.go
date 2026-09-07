@@ -479,7 +479,7 @@ func brandWordmark() *canvas.Text {
 
 // brandTagline is the quiet product line under the wordmark.
 func brandTagline() *canvas.Text {
-	tag := canvas.NewText("QOGE WALLET", qgDisplayMuted)
+	tag := canvas.NewText("QOGE POST-QUANTUM WALLET", qgDisplayMuted)
 	tag.TextSize = 10
 	return tag
 }
