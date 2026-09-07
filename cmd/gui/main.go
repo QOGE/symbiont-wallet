@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -230,6 +232,69 @@ type signedBroadcastContext struct {
 	destinationType qogeaddress.DestinationType
 	amountSats      int64
 	feeSats         int64
+}
+
+type preparedSpendUTXO struct {
+	TxID string
+	Vout uint32
+	Sats int64
+}
+
+type preparedSpendInputs struct {
+	WalletInputs []wallet.SpendInput
+	SpentUTXOs   []wallet.SpentUTXO
+	TxInputs     []txbuilder.TxInput
+	UTXOs        []preparedSpendUTXO
+	TotalSats    int64
+}
+
+func prepareSpendInputs(unspents []rpcclient.ScanUnspent) (preparedSpendInputs, error) {
+	if len(unspents) == 0 {
+		return preparedSpendInputs{}, fmt.Errorf("no UTXOs")
+	}
+	ordered := append([]rpcclient.ScanUnspent(nil), unspents...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Txid == ordered[j].Txid {
+			return ordered[i].Vout < ordered[j].Vout
+		}
+		return ordered[i].Txid < ordered[j].Txid
+	})
+	prepared := preparedSpendInputs{
+		WalletInputs: make([]wallet.SpendInput, 0, len(ordered)),
+		SpentUTXOs:   make([]wallet.SpentUTXO, 0, len(ordered)),
+		TxInputs:     make([]txbuilder.TxInput, 0, len(ordered)),
+		UTXOs:        make([]preparedSpendUTXO, 0, len(ordered)),
+	}
+	seen := make(map[string]struct{}, len(ordered))
+	for i, unspent := range ordered {
+		outpoint := fmt.Sprintf("%s:%d", unspent.Txid, unspent.Vout)
+		if _, duplicate := seen[outpoint]; duplicate {
+			return preparedSpendInputs{}, fmt.Errorf("duplicate UTXO %s", outpoint)
+		}
+		seen[outpoint] = struct{}{}
+		txidLE, err := txbuilder.TxIDLEFromHex(unspent.Txid)
+		if err != nil {
+			return preparedSpendInputs{}, fmt.Errorf("UTXO %d txid: %w", i, err)
+		}
+		sats, err := rpcclient.FloatQOGEToSatoshis(unspent.Amount)
+		if err != nil || sats <= 0 {
+			return preparedSpendInputs{}, fmt.Errorf("UTXO %s amount is invalid: %v", outpoint, err)
+		}
+		if prepared.TotalSats > math.MaxInt64-sats {
+			return preparedSpendInputs{}, fmt.Errorf("UTXO total overflows satoshi range")
+		}
+		script, err := hex.DecodeString(unspent.ScriptPubKey)
+		if err != nil || len(script) == 0 {
+			return preparedSpendInputs{}, fmt.Errorf("UTXO %s scriptPubKey is invalid: %v", outpoint, err)
+		}
+		input := wallet.SpendInput{TxIDLE: txidLE, Vout: unspent.Vout, NSequence: 0xffffffff}
+		prepared.WalletInputs = append(prepared.WalletInputs, input)
+		prepared.SpentUTXOs = append(prepared.SpentUTXOs, wallet.SpentUTXO{Amount: sats, Script: script})
+		prepared.TxInputs = append(prepared.TxInputs, txbuilder.TxInput(input))
+		prepared.UTXOs = append(prepared.UTXOs, preparedSpendUTXO{TxID: unspent.Txid, Vout: unspent.Vout, Sats: sats})
+		prepared.TotalSats += sats
+	}
+	return prepared, nil
 }
 
 func broadcastAndRecord(send func() (string, error), record func(string) error) (txid string, historyErr error, err error) {
@@ -976,6 +1041,11 @@ func main() {
 	amountEntry := widget.NewEntry()
 	amountEntry.SetPlaceHolder("e.g. 1 or 0.5")
 	amountField := container.NewGridWrap(fyne.NewSize(180, amountEntry.MinSize().Height), amountEntry)
+	feeRateEntry := widget.NewEntry()
+	feeRateEntry.SetText(txbuilder.DefaultFeeRateQOGE)
+	feeRateField := container.NewGridWrap(fyne.NewSize(180, feeRateEntry.MinSize().Height), feeRateEntry)
+	feeRateLabel := widget.NewLabel("Fee rate (QOGE/kB): A too-low fee may result in a slow or never-confirming transaction.")
+	feeRateLabel.Wrapping = fyne.TextWrapWord
 
 	sendStatusLabel := widget.NewLabel("")
 	sendStatusLabel.Wrapping = fyne.TextWrapWord
@@ -1162,14 +1232,12 @@ func main() {
 			return
 		}
 		if rpc == nil {
-			sendStatusLabel.SetText("Node RPC required to fetch UTXO — connect from the Network tab.")
+			sendStatusLabel.SetText("Node RPC required to fetch UTXOs — connect from the Network tab.")
 			return
 		}
-
 		if err := populateSendDropdowns(); err != nil {
 			sendStatusLabel.SetText(err.Error())
 		}
-
 		fromAddr, selected := resolveSendFromOption(sendFromSelect.Selected, sendFromOptionAddresses)
 		if !selected {
 			sendStatusLabel.SetText("Select a From address (FUNDED).")
@@ -1184,211 +1252,141 @@ func main() {
 			sendStatusLabel.SetText(fmt.Sprintf("Invalid destination: %v", err))
 			return
 		}
-
 		sendSats, err := txbuilder.QOGEToSatoshis(amountEntry.Text)
-		if err != nil {
+		if err != nil || sendSats <= 0 {
 			sendStatusLabel.SetText(fmt.Sprintf("Invalid amount: %v", err))
 			return
 		}
-		if sendSats <= 0 {
-			sendStatusLabel.SetText("Amount must be positive.")
+		feeRateSats, err := txbuilder.ParseFeeRate(feeRateEntry.Text)
+		if err != nil {
+			sendStatusLabel.SetText(fmt.Sprintf("Invalid fee rate: %v", err))
 			return
 		}
-
-		sendStatusLabel.SetText("Fetching UTXO from node...")
-
-		// Fetch the live UTXO for the From address.
+		sendStatusLabel.SetText("Fetching all UTXOs from node...")
 		scanResult, err := rpc.ScanTxOutSet(context.Background(), []string{"addr(" + fromAddr + ")"})
 		if err != nil {
 			sendStatusLabel.SetText(fmt.Sprintf("scantxoutset error: %v", err))
 			return
 		}
-		if len(scanResult.Unspents) == 0 {
-			sendStatusLabel.SetText("No UTXOs found for From address — has the payment confirmed on-chain?")
-			return
-		}
-		if len(scanResult.Unspents) > 1 {
-			sendStatusLabel.SetText(fmt.Sprintf(
-				"WARNING: %d UTXOs for From address — this tool handles exactly one. Select a different address or split manually.",
-				len(scanResult.Unspents)))
-			return
-		}
-		utxo := scanResult.Unspents[0]
-
-		// Fix 1: convert UTXO amount via string decimal parsing, not float64
-		// multiplication. FloatQOGEToSatoshis goes through fmt.Sprintf("%.8f")
-		// and integer arithmetic — no float64 satoshi arithmetic in the signing path.
-		utxoSats, err := rpcclient.FloatQOGEToSatoshis(utxo.Amount)
+		prepared, err := prepareSpendInputs(scanResult.Unspents)
 		if err != nil {
-			sendStatusLabel.SetText(fmt.Sprintf("UTXO amount conversion error: %v", err))
+			sendStatusLabel.SetText(fmt.Sprintf("Cannot prepare UTXOs: %v", err))
 			return
 		}
-
-		feeSats := txbuilder.FixedFeeSats
-		changeSats, err := txbuilder.CalcChange(utxoSats, sendSats, feeSats)
+		toScript := append([]byte(nil), toDestination.ScriptPubKey...)
+		feePlan, err := txbuilder.PlanP2QPKFee(prepared.TotalSats, sendSats, feeRateSats, len(prepared.WalletInputs), toScript)
 		if err != nil {
 			sendStatusLabel.SetText(err.Error())
 			return
 		}
-
-		// Fix 2: decode the RPC-returned scriptPubKey bytes now, so the wallet's
-		// ErrFromAddrScriptMismatch check runs against real on-chain data, not a
-		// value re-derived from fromAddr (which would always match and make the
-		// check a tautology).
-		fromScriptBytes, err := hex.DecodeString(utxo.ScriptPubKey)
-		if err != nil {
-			sendStatusLabel.SetText(fmt.Sprintf("UTXO scriptPubKey decode error: %v", err))
-			return
-		}
-
-		// Fix 3: zero-change path — peek changeAddr only when there is actual
-		// change to route. When changeSats == 0 the UTXO exactly covers send+fee;
-		// building a zero-value change output is non-standard and wastes an address.
 		var changeAddr string
-		if changeSats > 0 {
+		spendOutputs := []wallet.SpendOutput{{Amount: sendSats, Script: toScript}}
+		txOutputs := []txbuilder.TxOutput{{Amount: sendSats, Script: toScript}}
+		if feePlan.IncludeChange {
 			changeAddr, err = wlt.NextReceiveAddress()
 			if err != nil {
 				sendStatusLabel.SetText(fmt.Sprintf("Cannot select change address: %v", err))
 				return
 			}
 			if changeAddr == toAddr {
-				sendStatusLabel.SetText(
-					"Change address conflicts with To address — both would be the lowest-index FRESH address.\n" +
-						"Generate more addresses (Receive tab) or pick a different To address.")
+				sendStatusLabel.SetText("Change address conflicts with the destination — select a different wallet-owned destination or use an external address.")
 				return
 			}
+			changeScript, err := txbuilder.P2QPKScript(changeAddr)
+			if err != nil {
+				sendStatusLabel.SetText(fmt.Sprintf("change script error: %v", err))
+				return
+			}
+			spendOutputs = append(spendOutputs, wallet.SpendOutput{Amount: feePlan.ChangeSats, Script: changeScript})
+			txOutputs = append(txOutputs, txbuilder.TxOutput{Amount: feePlan.ChangeSats, Script: changeScript})
 		}
-
-		// Build the preview text shown in the confirm dialog.
-		var changeLines string
-		if changeSats > 0 {
-			changeLines = fmt.Sprintf("Change:    %s QOGE  (%d sat)\n  → to:   %s\n\n",
-				rpcclient.FormatQOGE(changeSats), changeSats, changeAddr)
-		} else {
-			changeLines = "Change:    none (exact spend — no change output)\n\n"
+		var utxoLines strings.Builder
+		for i, utxo := range prepared.UTXOs {
+			fmt.Fprintf(&utxoLines, "  %d. %s:%d  (%s QOGE / %d sat)\n",
+				i+1, utxo.TxID, utxo.Vout, rpcclient.FormatQOGE(utxo.Sats), utxo.Sats)
+		}
+		changeLines := "Change:      none\n"
+		if feePlan.IncludeChange {
+			changeLines = fmt.Sprintf("Change:      %s QOGE  (%d sat)\n  → to:     %s\n",
+				rpcclient.FormatQOGE(feePlan.ChangeSats), feePlan.ChangeSats, changeAddr)
 		}
 		previewText := fmt.Sprintf(
-			"From:      %s\n\n"+
-				"To:        %s\n"+
-				"Type:      %s\n\n"+
-				"Amount:    %s QOGE  (%d sat)\n"+
-				"Fee:       0.00010000 QOGE  (%d sat)  [fixed]\n"+
-				"%s"+
-				"UTXO:      %s:%d  (%s QOGE)\n\n"+
+			"From:        %s\n\n"+
+				"To:          %s\n"+
+				"Type:        %s\n\n"+
+				"Inputs:      %d UTXO(s)\n"+
+				"Total input: %s QOGE  (%d sat)\n"+
+				"UTXOs:\n%s\n"+
+				"Amount:      %s QOGE  (%d sat)\n"+
+				"Fee rate:    %s QOGE/kB\n"+
+				"Final vsize: %d vB\n"+
+				"Actual fee:  %s QOGE  (%d sat)\n"+
+				"%s\n"+
 				"⚠  This will irreversibly spend real mainnet QOGE.\n"+
 				"   Signing does NOT broadcast automatically.\n"+
-				"   After signing, run Test in Mempool, then use the separate\n"+
+				"   After signing, run Test Transaction, then use the separate\n"+
 				"   Broadcast Transaction button.",
-			fromAddr,
-			toAddr,
-			toDestination.Type,
+			fromAddr, toAddr, toDestination.Type,
+			len(prepared.UTXOs), rpcclient.FormatQOGE(prepared.TotalSats), prepared.TotalSats, utxoLines.String(),
 			rpcclient.FormatQOGE(sendSats), sendSats,
-			feeSats,
+			rpcclient.FormatQOGE(feeRateSats), feePlan.VSize,
+			rpcclient.FormatQOGE(feePlan.FeeSats), feePlan.FeeSats,
 			changeLines,
-			utxo.Txid, utxo.Vout, rpcclient.FormatQOGE(utxoSats),
 		)
-
 		content := widget.NewLabel(previewText)
 		content.TextStyle = fyne.TextStyle{Monospace: true}
 		content.Wrapping = fyne.TextWrapBreak
-
 		scrolledContent := container.NewVScroll(content)
 		scrolledContent.SetMinSize(fyne.NewSize(760, 420))
-
 		sendStatusLabel.SetText("Preview ready — confirm to sign.")
-
-		dialog.ShowCustomConfirm(
-			"Confirm Transaction",
-			"Sign", "Cancel",
-			scrolledContent,
-			func(ok bool) {
-				if !ok {
-					sendStatusLabel.SetText("Cancelled.")
-					return
-				}
-
-				sendStatusLabel.SetText("Signing…")
-
-				txidLE, err := txbuilder.TxIDLEFromHex(utxo.Txid)
-				if err != nil {
-					sendStatusLabel.SetText(fmt.Sprintf("txid conversion error: %v", err))
-					return
-				}
-
-				toScript := append([]byte(nil), toDestination.ScriptPubKey...)
-
-				// Build outputs and params depending on whether there is change.
-				spendOutputs := []wallet.SpendOutput{{Amount: sendSats, Script: toScript}}
-				txOutputs := []txbuilder.TxOutput{{Amount: sendSats, Script: toScript}}
-
-				if changeSats > 0 {
-					changeScript, err := txbuilder.P2QPKScript(changeAddr)
-					if err != nil {
-						sendStatusLabel.SetText(fmt.Sprintf("change script error: %v", err))
-						return
-					}
-					spendOutputs = append(spendOutputs, wallet.SpendOutput{Amount: changeSats, Script: changeScript})
-					txOutputs = append(txOutputs, txbuilder.TxOutput{Amount: changeSats, Script: changeScript})
-				}
-
-				params := wallet.P2QPKSpendParams{
-					NVersion:  2,
-					NLockTime: 0,
-					Inputs:    []wallet.SpendInput{{TxIDLE: txidLE, Vout: utxo.Vout, NSequence: 0xFFFFFFFF}},
-					// Fix 2: use the actual on-chain scriptPubKey from scantxoutset,
-					// not a value re-derived from fromAddr, so the wallet's script
-					// consistency check runs against real fetched data.
-					SpentUTXOs: []wallet.SpentUTXO{{Amount: utxoSats, Script: fromScriptBytes}},
-					Outputs:    spendOutputs,
-					InputIndex: 0,
-					FromAddr:   fromAddr,
-					ChangeAddr: changeAddr, // "" when changeSats == 0 (no-change tx)
-				}
-
-				pubKey, sig, err := wlt.SignP2QPKInput(params)
-				if err != nil {
-					sendStatusLabel.SetText(fmt.Sprintf("SignP2QPKInput error: %v", err))
-					return
-				}
-
-				signed := txbuilder.SignedP2QPKTx{
-					NVersion:  params.NVersion,
-					NLockTime: params.NLockTime,
-					Inputs:    []txbuilder.TxInput{{TxIDLE: txidLE, Vout: utxo.Vout, NSequence: 0xFFFFFFFF}},
-					Outputs:   txOutputs,
-					Sig:       sig,
-					PubKey:    pubKey,
-				}
-
-				raw, err := txbuilder.SerializeBIP144(signed)
-				if err != nil {
-					sendStatusLabel.SetText(fmt.Sprintf("serialization error: %v", err))
-					return
-				}
-
-				signedTxHex = hex.EncodeToString(raw)
-				broadcastContext = signedBroadcastContext{
-					rawHex: signedTxHex, source: fromAddr, destination: toAddr, destinationType: toDestination.Type, amountSats: sendSats, feeSats: feeSats,
-				}
-				// Show a short preview — never render the full 34,528-char string
-				// into a widget (confirmed cause of GUI freeze on real P2QPK tx).
-				preview := fmt.Sprintf("%d bytes  /  %d hex chars\n%s…\n…%s",
-					len(raw), len(signedTxHex),
-					signedTxHex[:64],
-					signedTxHex[len(signedTxHex)-64:])
-				rawHexPreviewLabel.SetText(preview)
-
-				statusMsg := fmt.Sprintf("Signed — %d bytes raw tx (%d bytes hex).\n"+
-					"From address is now SPEND_PENDING until Refresh detects at least 1 on-chain confirmation.\n",
-					len(raw), len(raw)*2)
-				if changeSats > 0 {
-					statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)
-				}
-				statusMsg += "Run Test in Mempool successfully to enable Broadcast Transaction."
-				sendStatusLabel.SetText(statusMsg)
-			},
-			w,
-		)
+		dialog.ShowCustomConfirm("Confirm Transaction", "Sign", "Cancel", scrolledContent, func(ok bool) {
+			if !ok {
+				sendStatusLabel.SetText("Cancelled.")
+				return
+			}
+			sendStatusLabel.SetText(fmt.Sprintf("Signing %d input(s)…", len(prepared.WalletInputs)))
+			params := wallet.P2QPKSpendParams{
+				NVersion: 2, NLockTime: 0,
+				Inputs: prepared.WalletInputs, SpentUTXOs: prepared.SpentUTXOs,
+				Outputs: spendOutputs, InputIndex: 0,
+				FromAddr: fromAddr, ChangeAddr: changeAddr,
+			}
+			pubKey, signatures, err := wlt.SignP2QPKInputs(params)
+			if err != nil {
+				sendStatusLabel.SetText(fmt.Sprintf("SignP2QPKInputs error: %v", err))
+				return
+			}
+			witnesses := make([]txbuilder.P2QPKWitness, len(signatures))
+			for i, signature := range signatures {
+				witnesses[i] = txbuilder.P2QPKWitness{Sig: signature, PubKey: pubKey}
+			}
+			signed := txbuilder.SignedP2QPKTx{
+				NVersion: params.NVersion, NLockTime: params.NLockTime,
+				Inputs: prepared.TxInputs, Outputs: txOutputs, Witnesses: witnesses,
+			}
+			raw, err := txbuilder.SerializeBIP144(signed)
+			if err != nil {
+				sendStatusLabel.SetText(fmt.Sprintf("serialization error: %v", err))
+				return
+			}
+			signedTxHex = hex.EncodeToString(raw)
+			broadcastContext = signedBroadcastContext{
+				rawHex: signedTxHex, source: fromAddr, destination: toAddr,
+				destinationType: toDestination.Type, amountSats: sendSats, feeSats: feePlan.FeeSats,
+			}
+			preview := fmt.Sprintf("%d bytes / %d vB / %d inputs / %d hex chars\n%s…\n…%s",
+				len(raw), feePlan.VSize, len(prepared.TxInputs), len(signedTxHex),
+				signedTxHex[:64], signedTxHex[len(signedTxHex)-64:])
+			rawHexPreviewLabel.SetText(preview)
+			statusMsg := fmt.Sprintf("Signed %d inputs — %d bytes raw tx, %d vB, fee %s QOGE.\n"+
+				"From address is now SPEND_PENDING until Refresh detects at least 1 on-chain confirmation.\n",
+				len(prepared.TxInputs), len(raw), feePlan.VSize, rpcclient.FormatQOGE(feePlan.FeeSats))
+			if feePlan.IncludeChange {
+				statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)
+			}
+			statusMsg += "Run Test Transaction successfully to enable Broadcast Transaction."
+			sendStatusLabel.SetText(statusMsg)
+		}, w)
 	})
 	previewBtn.Importance = widget.HighImportance
 
@@ -1434,7 +1432,8 @@ func main() {
 			externalValidationLabel,
 			widget.NewLabel("Amount (QOGE):"),
 			transactionActionRow,
-			widget.NewLabel("Fee: 0.0001 QOGE (fixed)"),
+			feeRateLabel,
+			feeRateField,
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex:"),
 			rawHexPreviewLabel,

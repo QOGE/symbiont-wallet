@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
@@ -40,6 +41,53 @@ func TestReadRPCCookie(t *testing.T) {
 	}
 	if cookie.username != rpcCookieUsername || cookie.password != wantPassword {
 		t.Fatalf("cookie = {%q, %q}, want {%q, %q}", cookie.username, cookie.password, rpcCookieUsername, wantPassword)
+	}
+}
+
+func TestPrepareSpendInputsAggregatesEveryUTXO(t *testing.T) {
+	for _, count := range []int{2, 4} {
+		t.Run(fmt.Sprintf("%d_utxos", count), func(t *testing.T) {
+			unspents := make([]rpcclient.ScanUnspent, count)
+			var wantTotal int64
+			for i := range unspents {
+				sats := int64((i + 1) * 125_000)
+				wantTotal += sats
+				unspents[count-1-i] = rpcclient.ScanUnspent{
+					Txid: strings.Repeat(fmt.Sprintf("%x", i+1), 64), Vout: uint32(i),
+					ScriptPubKey: "5220" + strings.Repeat("11", 32), Amount: float64(sats) / 1e8,
+				}
+			}
+			prepared, err := prepareSpendInputs(unspents)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(prepared.WalletInputs) != count || len(prepared.SpentUTXOs) != count ||
+				len(prepared.TxInputs) != count || len(prepared.UTXOs) != count {
+				t.Fatalf("parallel input lengths = %d/%d/%d/%d, want %d",
+					len(prepared.WalletInputs), len(prepared.SpentUTXOs), len(prepared.TxInputs), len(prepared.UTXOs), count)
+			}
+			if prepared.TotalSats != wantTotal {
+				t.Fatalf("total = %d, want %d", prepared.TotalSats, wantTotal)
+			}
+			for i := range prepared.WalletInputs {
+				if prepared.WalletInputs[i] != wallet.SpendInput(prepared.TxInputs[i]) {
+					t.Fatalf("wallet/serializer input %d diverged", i)
+				}
+				if i > 0 && prepared.UTXOs[i-1].TxID > prepared.UTXOs[i].TxID {
+					t.Fatalf("inputs are not deterministically ordered")
+				}
+			}
+		})
+	}
+}
+
+func TestPrepareSpendInputsRejectsDuplicateOutpoint(t *testing.T) {
+	unspent := rpcclient.ScanUnspent{
+		Txid: strings.Repeat("ab", 32), Vout: 7,
+		ScriptPubKey: "5220" + strings.Repeat("22", 32), Amount: 1,
+	}
+	if _, err := prepareSpendInputs([]rpcclient.ScanUnspent{unspent, unspent}); err == nil {
+		t.Fatal("duplicate outpoint accepted")
 	}
 }
 

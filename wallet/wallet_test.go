@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,29 @@ import (
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	slhdsa "github.com/saogen/qoge-sphincs-wallet/signer"
 )
+
+func makeMultiInputSpendParams(t *testing.T, fromAddr, changeAddr string, inputCount int) P2QPKSpendParams {
+	t.Helper()
+	fromScript, err := p2qpkScriptPubKey(fromAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeScript, err := p2qpkScriptPubKey(changeAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := P2QPKSpendParams{
+		NVersion: 2, FromAddr: fromAddr, ChangeAddr: changeAddr,
+		Outputs: []SpendOutput{{Amount: 150_000_000, Script: []byte{0x51}}, {Amount: 49_900_000, Script: changeScript}},
+	}
+	for i := 0; i < inputCount; i++ {
+		var txid [32]byte
+		txid[0], txid[31] = byte(i+1), byte(0x80+i)
+		params.Inputs = append(params.Inputs, SpendInput{TxIDLE: txid, Vout: uint32(i), NSequence: 0xffffffff})
+		params.SpentUTXOs = append(params.SpentUTXOs, SpentUTXO{Amount: 100_000_000, Script: append([]byte(nil), fromScript...)})
+	}
+	return params
+}
 
 // NOTE: These tests exercise the full Symbiont Wallet stack, including the
 // signer package (CGo -> liboqs SLH-DSA-SHA2-128f). Each CreateNew call
@@ -1829,5 +1853,96 @@ func TestSignP2QPKInputNoChangeRejectsMultipleOutputs(t *testing.T) {
 	_, _, err = w.SignP2QPKInput(params)
 	if err == nil {
 		t.Fatal("expected error for no-change tx with 2 outputs, got nil")
+	}
+}
+
+func TestSignP2QPKInputsSignsEveryInputBeforeLifecycleTransition(t *testing.T) {
+	for _, inputCount := range []int{2, 4} {
+		t.Run(fmt.Sprintf("%d_inputs", inputCount), func(t *testing.T) {
+			w := newTestWallet(t)
+			addresses := testFreshAddresses(t, w, 2)
+			fromAddr, changeAddr := addresses[0], addresses[1]
+			if err := testFundAddress(w, fromAddr); err != nil {
+				t.Fatal(err)
+			}
+			params := makeMultiInputSpendParams(t, fromAddr, changeAddr, inputCount)
+			pubKey, signatures, err := w.SignP2QPKInputs(params)
+			if err != nil {
+				t.Fatalf("SignP2QPKInputs: %v", err)
+			}
+			if len(signatures) != inputCount {
+				t.Fatalf("signatures len = %d, want %d", len(signatures), inputCount)
+			}
+			for i, signature := range signatures {
+				inputParams := params
+				inputParams.InputIndex = uint32(i)
+				digest, err := computeP2QPKSighash(inputParams)
+				if err != nil {
+					t.Fatal(err)
+				}
+				valid, err := slhdsa.Verify(digest, signature, pubKey)
+				if err != nil || !valid {
+					t.Fatalf("input %d signature verification = (%v, %v)", i, valid, err)
+				}
+				if i > 0 && bytes.Equal(signature, signatures[i-1]) {
+					t.Fatalf("inputs %d and %d received identical signatures", i-1, i)
+				}
+			}
+			rec, err := w.index.GetRecord(fromAddr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.State != keystore.StateSpendPending || rec.SpendTxID != p2qpkTxID(params) {
+				t.Fatalf("source after batch sign = state %s txid %q", rec.State, rec.SpendTxID)
+			}
+			changeRec, err := w.index.GetRecord(changeAddr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changeRec.Reserved || changeRec.State != keystore.StateFresh {
+				t.Fatalf("change after batch sign = state %s reserved %v", changeRec.State, changeRec.Reserved)
+			}
+		})
+	}
+}
+
+func TestSignP2QPKInputsValidatesEveryScriptBeforeStateChange(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 2)
+	fromAddr, changeAddr := addresses[0], addresses[1]
+	if err := testFundAddress(w, fromAddr); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, fromAddr, changeAddr, 3)
+	params.SpentUTXOs[2].Script = []byte{0x51}
+	if _, _, err := w.SignP2QPKInputs(params); !errors.Is(err, ErrFromAddrScriptMismatch) {
+		t.Fatalf("error = %v, want ErrFromAddrScriptMismatch", err)
+	}
+	fromRec, _ := w.index.GetRecord(fromAddr)
+	changeRec, _ := w.index.GetRecord(changeAddr)
+	if fromRec.State != keystore.StateFunded || changeRec.Reserved {
+		t.Fatalf("validation failure changed lifecycle: source=%s change reserved=%v", fromRec.State, changeRec.Reserved)
+	}
+}
+
+func TestSignP2QPKInputsRejectsDuplicatePrevoutWithDifferentSequence(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 2)
+	fromAddr, changeAddr := addresses[0], addresses[1]
+	if err := testFundAddress(w, fromAddr); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, fromAddr, changeAddr, 2)
+	params.Inputs[1].TxIDLE = params.Inputs[0].TxIDLE
+	params.Inputs[1].Vout = params.Inputs[0].Vout
+	params.Inputs[1].NSequence = params.Inputs[0].NSequence - 1
+
+	if _, _, err := w.SignP2QPKInputs(params); !errors.Is(err, ErrDuplicatePrevout) {
+		t.Fatalf("error = %v, want ErrDuplicatePrevout", err)
+	}
+	fromRec, _ := w.index.GetRecord(fromAddr)
+	changeRec, _ := w.index.GetRecord(changeAddr)
+	if fromRec.State != keystore.StateFunded || changeRec.Reserved {
+		t.Fatalf("duplicate-prevout rejection changed lifecycle: source=%s change reserved=%v", fromRec.State, changeRec.Reserved)
 	}
 }

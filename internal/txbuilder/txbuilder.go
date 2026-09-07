@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	SLHDSASigLen = 17088 // exact SLH-DSA-SHA2-128f signature length (FIPS 205)
-	SLHDSAPKLen  = 32    // exact SLH-DSA-SHA2-128f public key length
-	FixedFeeSats = int64(10_000) // 0.0001 QOGE — project-standard reference fee
+	SLHDSASigLen       = 17088 // exact SLH-DSA-SHA2-128f signature length (FIPS 205)
+	SLHDSAPKLen        = 32    // exact SLH-DSA-SHA2-128f public key length
+	DefaultFeeRateQOGE = "0.0001"
 )
 
 // TxInput is one input in a raw P2QPK transaction.
@@ -36,28 +36,43 @@ type TxOutput struct {
 	Script []byte // scriptPubKey bytes
 }
 
-// SignedP2QPKTx is a fully-signed single-input P2QPK transaction.
+// P2QPKFeePlan is the final fee/change result for a transaction shape.
+type P2QPKFeePlan struct {
+	FeeSats       int64
+	ChangeSats    int64
+	VSize         int64
+	IncludeChange bool
+}
+
+// P2QPKWitness is the witness stack for one P2QPK input.
 // Witness stack layout (BIP144 order, bottom to top):
 //   - witness[0] = Sig    (17088 bytes SLH-DSA signature, popped second by interpreter)
 //   - witness[1] = PubKey (32 bytes SLH-DSA public key,  popped first  by interpreter)
 //
 // This matches the qogecoind interpreter (interpreter.cpp VerifyWitnessProgram):
-//   pubkey = SpanPopBack(stack) // top  = witness[1]
-//   sig    = SpanPopBack(stack) // next = witness[0]
+//
+//	pubkey = SpanPopBack(stack) // top  = witness[1]
+//	sig    = SpanPopBack(stack) // next = witness[0]
+type P2QPKWitness struct {
+	Sig    []byte
+	PubKey []byte
+}
+
+// SignedP2QPKTx is a fully-signed P2QPK transaction. Witnesses is parallel
+// with Inputs and must contain exactly one P2QPK witness per input.
 type SignedP2QPKTx struct {
 	NVersion  int32
 	NLockTime uint32
 	Inputs    []TxInput
 	Outputs   []TxOutput
-	Sig       []byte // SLH-DSA signature: exactly SLHDSASigLen bytes
-	PubKey    []byte // SLH-DSA public key: exactly SLHDSAPKLen bytes
+	Witnesses []P2QPKWitness
 }
 
 // SerializeBIP144 encodes tx in Bitcoin BIP144 extended serialization format:
-//   nVersion | 0x00 0x01 | vin | vout | witness-per-input | nLockTime
 //
-// All inputs beyond index 0 are given empty witness stacks.
-// Returns an error if the signature or public key lengths are wrong.
+//	nVersion | 0x00 0x01 | vin | vout | witness-per-input | nLockTime
+//
+// Returns an error unless every input has a correctly-sized witness.
 func SerializeBIP144(tx SignedP2QPKTx) ([]byte, error) {
 	if len(tx.Inputs) == 0 {
 		return nil, fmt.Errorf("txbuilder: SerializeBIP144: no inputs")
@@ -65,11 +80,21 @@ func SerializeBIP144(tx SignedP2QPKTx) ([]byte, error) {
 	if len(tx.Outputs) == 0 {
 		return nil, fmt.Errorf("txbuilder: SerializeBIP144: no outputs")
 	}
-	if len(tx.Sig) != SLHDSASigLen {
-		return nil, fmt.Errorf("txbuilder: SerializeBIP144: sig length %d, want %d", len(tx.Sig), SLHDSASigLen)
+	if len(tx.Witnesses) != len(tx.Inputs) {
+		return nil, fmt.Errorf("txbuilder: SerializeBIP144: witnesses len %d, want inputs len %d", len(tx.Witnesses), len(tx.Inputs))
 	}
-	if len(tx.PubKey) != SLHDSAPKLen {
-		return nil, fmt.Errorf("txbuilder: SerializeBIP144: pubkey length %d, want %d", len(tx.PubKey), SLHDSAPKLen)
+	for i, witness := range tx.Witnesses {
+		if len(witness.Sig) != SLHDSASigLen {
+			return nil, fmt.Errorf("txbuilder: SerializeBIP144: witness %d sig length %d, want %d", i, len(witness.Sig), SLHDSASigLen)
+		}
+		if len(witness.PubKey) != SLHDSAPKLen {
+			return nil, fmt.Errorf("txbuilder: SerializeBIP144: witness %d pubkey length %d, want %d", i, len(witness.PubKey), SLHDSAPKLen)
+		}
+	}
+	for i, output := range tx.Outputs {
+		if output.Amount < 0 {
+			return nil, fmt.Errorf("txbuilder: SerializeBIP144: output %d amount is negative", i)
+		}
 	}
 
 	var buf bytes.Buffer
@@ -80,9 +105,9 @@ func SerializeBIP144(tx SignedP2QPKTx) ([]byte, error) {
 	// Inputs
 	writeCompact(&buf, uint64(len(tx.Inputs)))
 	for _, in := range tx.Inputs {
-		buf.Write(in.TxIDLE[:])      // txid wire order (32 bytes)
-		writeLE32(&buf, in.Vout)     // vout (4 bytes LE)
-		writeCompact(&buf, 0)        // scriptSig: empty (segwit spends have no scriptSig)
+		buf.Write(in.TxIDLE[:])  // txid wire order (32 bytes)
+		writeLE32(&buf, in.Vout) // vout (4 bytes LE)
+		writeCompact(&buf, 0)    // scriptSig: empty (segwit spends have no scriptSig)
 		writeLE32(&buf, in.NSequence)
 	}
 
@@ -94,22 +119,113 @@ func SerializeBIP144(tx SignedP2QPKTx) ([]byte, error) {
 		buf.Write(out.Script)
 	}
 
-	// Witness (parallel with inputs; non-zero only for input 0)
-	for i := range tx.Inputs {
-		if i == 0 {
-			writeCompact(&buf, 2) // 2 witness items
-			writeCompact(&buf, uint64(len(tx.Sig)))
-			buf.Write(tx.Sig)
-			writeCompact(&buf, uint64(len(tx.PubKey)))
-			buf.Write(tx.PubKey)
-		} else {
-			writeCompact(&buf, 0) // 0 items — empty witness
-		}
+	// Witnesses, exactly parallel with inputs.
+	for _, witness := range tx.Witnesses {
+		writeCompact(&buf, 2)
+		writeCompact(&buf, uint64(len(witness.Sig)))
+		buf.Write(witness.Sig)
+		writeCompact(&buf, uint64(len(witness.PubKey)))
+		buf.Write(witness.PubKey)
 	}
 
 	writeLE32(&buf, tx.NLockTime)
 
 	return buf.Bytes(), nil
+}
+
+// P2QPKVirtualSize returns the exact vsize of a final transaction shape. P2QPK
+// signatures and public keys have fixed lengths, so no signature bytes are
+// needed to calculate the final BIP141 weight.
+func P2QPKVirtualSize(inputCount int, outputs []TxOutput) (int64, error) {
+	if inputCount <= 0 {
+		return 0, fmt.Errorf("txbuilder: P2QPKVirtualSize: input count must be positive")
+	}
+	if len(outputs) == 0 {
+		return 0, fmt.Errorf("txbuilder: P2QPKVirtualSize: no outputs")
+	}
+	stripped := int64(4 + compactSizeLen(uint64(inputCount)) + inputCount*41 + compactSizeLen(uint64(len(outputs))) + 4)
+	for _, output := range outputs {
+		if output.Amount < 0 {
+			return 0, fmt.Errorf("txbuilder: P2QPKVirtualSize: negative output amount")
+		}
+		stripped += int64(8 + compactSizeLen(uint64(len(output.Script))) + len(output.Script))
+	}
+	witnessPerInput := 1 + compactSizeLen(SLHDSASigLen) + SLHDSASigLen + compactSizeLen(SLHDSAPKLen) + SLHDSAPKLen
+	witness := int64(2 + inputCount*witnessPerInput) // marker+flag plus every input witness
+	weight := stripped*4 + witness
+	return (weight + 3) / 4, nil
+}
+
+// FeeForRate calculates Core-compatible fees: ceil(rate_sats_per_kB*vsize/1000).
+func FeeForRate(rateSatsPerKB, vsize int64) (int64, error) {
+	if rateSatsPerKB <= 0 {
+		return 0, fmt.Errorf("txbuilder: fee rate must be positive")
+	}
+	if vsize <= 0 {
+		return 0, fmt.Errorf("txbuilder: vsize must be positive")
+	}
+	if rateSatsPerKB > (math.MaxInt64-999)/vsize {
+		return 0, fmt.Errorf("txbuilder: fee calculation overflows int64")
+	}
+	return (rateSatsPerKB*vsize + 999) / 1000, nil
+}
+
+// ParseFeeRate parses a positive QOGE/kB fee rate using exact satoshi units.
+func ParseFeeRate(value string) (int64, error) {
+	if strings.HasPrefix(strings.TrimSpace(value), "-") {
+		return 0, fmt.Errorf("txbuilder: fee rate must be positive")
+	}
+	rate, err := QOGEToSatoshis(value)
+	if err != nil {
+		return 0, fmt.Errorf("txbuilder: invalid fee rate: %w", err)
+	}
+	if rate <= 0 {
+		return 0, fmt.Errorf("txbuilder: fee rate must be positive")
+	}
+	return rate, nil
+}
+
+// PlanP2QPKFee computes a fee against the actual final vsize. Change outputs
+// are always 34-byte wallet-owned P2QPK scripts. If the remainder cannot fund
+// a change-bearing transaction but can fund the one-output shape, it becomes
+// the actual fee rather than creating an underfunded or zero-valued output.
+func PlanP2QPKFee(totalInputSats, sendSats, rateSatsPerKB int64, inputCount int, destinationScript []byte) (P2QPKFeePlan, error) {
+	if totalInputSats <= 0 {
+		return P2QPKFeePlan{}, fmt.Errorf("txbuilder: total input must be positive")
+	}
+	if sendSats <= 0 || sendSats > totalInputSats {
+		return P2QPKFeePlan{}, fmt.Errorf("txbuilder: send amount %d is not covered by total input %d", sendSats, totalInputSats)
+	}
+	if len(destinationScript) == 0 {
+		return P2QPKFeePlan{}, fmt.Errorf("txbuilder: destination script is empty")
+	}
+	noChangeOutputs := []TxOutput{{Amount: sendSats, Script: destinationScript}}
+	noChangeVSize, err := P2QPKVirtualSize(inputCount, noChangeOutputs)
+	if err != nil {
+		return P2QPKFeePlan{}, err
+	}
+	noChangeMinimum, err := FeeForRate(rateSatsPerKB, noChangeVSize)
+	if err != nil {
+		return P2QPKFeePlan{}, err
+	}
+	remainder := totalInputSats - sendSats
+	if remainder < noChangeMinimum {
+		return P2QPKFeePlan{}, fmt.Errorf("txbuilder: insufficient funds: total input %d, send %d, minimum fee %d", totalInputSats, sendSats, noChangeMinimum)
+	}
+
+	changeOutputs := append(noChangeOutputs, TxOutput{Script: make([]byte, 34)})
+	changeVSize, err := P2QPKVirtualSize(inputCount, changeOutputs)
+	if err != nil {
+		return P2QPKFeePlan{}, err
+	}
+	changeFee, err := FeeForRate(rateSatsPerKB, changeVSize)
+	if err != nil {
+		return P2QPKFeePlan{}, err
+	}
+	if remainder > changeFee {
+		return P2QPKFeePlan{FeeSats: changeFee, ChangeSats: remainder - changeFee, VSize: changeVSize, IncludeChange: true}, nil
+	}
+	return P2QPKFeePlan{FeeSats: remainder, VSize: noChangeVSize}, nil
 }
 
 // TxIDLEFromHex converts a txid from RPC display format (64 hex chars,
@@ -132,7 +248,8 @@ func TxIDLEFromHex(txidHex string) ([32]byte, error) {
 }
 
 // P2QPKScript returns the 34-byte scriptPubKey for a bq1z P2QPK address:
-//   OP_2 (0x52) || PUSH32 (0x20) || 32-byte witness program (HASH256 of pubkey)
+//
+//	OP_2 (0x52) || PUSH32 (0x20) || 32-byte witness program (HASH256 of pubkey)
 func P2QPKScript(addr string) ([]byte, error) {
 	hash, err := address.ToHash(addr)
 	if err != nil {
@@ -246,5 +363,18 @@ func writeCompact(buf *bytes.Buffer, n uint64) {
 		b[0] = 0xff
 		binary.LittleEndian.PutUint64(b[1:], n)
 		buf.Write(b[:9])
+	}
+}
+
+func compactSizeLen(n uint64) int {
+	switch {
+	case n < 0xfd:
+		return 1
+	case n <= 0xffff:
+		return 3
+	case n <= 0xffffffff:
+		return 5
+	default:
+		return 9
 	}
 }

@@ -53,11 +53,11 @@ func TestQOGEToSatoshis(t *testing.T) {
 		{"22", 2_200_000_000, true},
 		{"22.00000000", 2_200_000_000, true},
 		{"0.00000001", 1, true},
-		{"  1 ", 100_000_000, true},         // whitespace
-		{"", 0, false},                       // empty
-		{"abc", 0, false},                    // non-numeric
-		{"1.000000000", 0, false},            // 9 decimal places
-		{"-1", 0, false},                     // negative
+		{"  1 ", 100_000_000, true}, // whitespace
+		{"", 0, false},              // empty
+		{"abc", 0, false},           // non-numeric
+		{"1.000000000", 0, false},   // 9 decimal places
+		{"-1", 0, false},            // negative
 	}
 	for _, tc := range cases {
 		got, err := QOGEToSatoshis(tc.input)
@@ -195,8 +195,9 @@ func makeSyntheticTx(t *testing.T) SignedP2QPKTx {
 			{Amount: 100_000_000, Script: recipientScript},
 			{Amount: 2_099_990_000, Script: changeScript},
 		},
-		Sig:    make([]byte, SLHDSASigLen),
-		PubKey: make([]byte, SLHDSAPKLen),
+		Witnesses: []P2QPKWitness{{
+			Sig: make([]byte, SLHDSASigLen), PubKey: make([]byte, SLHDSAPKLen),
+		}},
 	}
 }
 
@@ -276,7 +277,7 @@ func TestSerializeBIP144_InputVout(t *testing.T) {
 
 func TestSerializeBIP144_WrongSigLen(t *testing.T) {
 	tx := makeSyntheticTx(t)
-	tx.Sig = make([]byte, 100) // wrong
+	tx.Witnesses[0].Sig = make([]byte, 100) // wrong
 	_, err := SerializeBIP144(tx)
 	if err == nil {
 		t.Fatal("expected error for wrong sig length")
@@ -285,7 +286,7 @@ func TestSerializeBIP144_WrongSigLen(t *testing.T) {
 
 func TestSerializeBIP144_WrongPubKeyLen(t *testing.T) {
 	tx := makeSyntheticTx(t)
-	tx.PubKey = make([]byte, 10) // wrong
+	tx.Witnesses[0].PubKey = make([]byte, 10) // wrong
 	_, err := SerializeBIP144(tx)
 	if err == nil {
 		t.Fatal("expected error for wrong pubkey length")
@@ -324,6 +325,166 @@ func TestSerializeBIP144_WitnessCompactSize(t *testing.T) {
 	if raw[witnessStart+3] != 0x42 {
 		t.Errorf("sig compact_size[2] = 0x%02x, want 0x42", raw[witnessStart+3])
 	}
+}
+
+func TestSerializeBIP144WritesWitnessForEveryInput(t *testing.T) {
+	tx := makeSyntheticTx(t)
+	tx.Inputs = append(tx.Inputs,
+		TxInput{TxIDLE: tx.Inputs[0].TxIDLE, Vout: 1, NSequence: 0xffffffff},
+		TxInput{TxIDLE: tx.Inputs[0].TxIDLE, Vout: 2, NSequence: 0xffffffff},
+	)
+	tx.Witnesses = []P2QPKWitness{
+		{Sig: bytesOf(0x11, SLHDSASigLen), PubKey: bytesOf(0xa1, SLHDSAPKLen)},
+		{Sig: bytesOf(0x22, SLHDSASigLen), PubKey: bytesOf(0xa2, SLHDSAPKLen)},
+		{Sig: bytesOf(0x33, SLHDSASigLen), PubKey: bytesOf(0xa3, SLHDSAPKLen)},
+	}
+	raw, err := SerializeBIP144(tx)
+	if err != nil {
+		t.Fatalf("SerializeBIP144: %v", err)
+	}
+
+	offset := 4 + 2 + 1 + len(tx.Inputs)*41 + 1
+	for _, output := range tx.Outputs {
+		offset += 8 + compactSizeLen(uint64(len(output.Script))) + len(output.Script)
+	}
+	for i, witness := range tx.Witnesses {
+		if raw[offset] != 2 || raw[offset+1] != 0xfd {
+			t.Fatalf("input %d witness header malformed at offset %d", i, offset)
+		}
+		offset += 1 + compactSizeLen(SLHDSASigLen)
+		if raw[offset] != witness.Sig[0] {
+			t.Fatalf("input %d signature marker = %x, want %x", i, raw[offset], witness.Sig[0])
+		}
+		offset += len(witness.Sig) + compactSizeLen(SLHDSAPKLen)
+		if raw[offset] != witness.PubKey[0] {
+			t.Fatalf("input %d pubkey marker = %x, want %x", i, raw[offset], witness.PubKey[0])
+		}
+		offset += len(witness.PubKey)
+	}
+	if offset != len(raw)-4 {
+		t.Fatalf("witnesses end at %d, locktime begins at %d", offset, len(raw)-4)
+	}
+}
+
+func TestSerializeBIP144RejectsWitnessCountMismatch(t *testing.T) {
+	tx := makeSyntheticTx(t)
+	tx.Inputs = append(tx.Inputs, tx.Inputs[0])
+	if _, err := SerializeBIP144(tx); err == nil {
+		t.Fatal("expected witness/input count mismatch error")
+	}
+}
+
+func TestP2QPKVirtualSizeMatchesSerializedWeight(t *testing.T) {
+	for _, inputCount := range []int{1, 2, 4} {
+		tx := makeSyntheticTx(t)
+		for len(tx.Inputs) < inputCount {
+			tx.Inputs = append(tx.Inputs, tx.Inputs[0])
+			tx.Witnesses = append(tx.Witnesses, tx.Witnesses[0])
+		}
+		raw, err := SerializeBIP144(tx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stripped := 4 + compactSizeLen(uint64(inputCount)) + inputCount*41 + compactSizeLen(uint64(len(tx.Outputs))) + 4
+		for _, output := range tx.Outputs {
+			stripped += 8 + compactSizeLen(uint64(len(output.Script))) + len(output.Script)
+		}
+		want := int64((stripped*4 + len(raw) - stripped + 3) / 4)
+		got, err := P2QPKVirtualSize(inputCount, tx.Outputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%d inputs: vsize = %d, want %d", inputCount, got, want)
+		}
+	}
+}
+
+func TestFeeForRateMatchesCoreCeiling(t *testing.T) {
+	for _, tc := range []struct{ rate, vsize, want int64 }{
+		{10_000, 4_418, 44_180},
+		{1, 1_001, 2},
+		{12_345, 8_777, 108_353},
+	} {
+		got, err := FeeForRate(tc.rate, tc.vsize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Fatalf("FeeForRate(%d, %d) = %d, want %d", tc.rate, tc.vsize, got, tc.want)
+		}
+	}
+}
+
+func TestParseFeeRateRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"", "abc", "-0.1", "0", "0.000000001"} {
+		if _, err := ParseFeeRate(value); err == nil {
+			t.Fatalf("ParseFeeRate(%q) succeeded", value)
+		}
+	}
+	if got, err := ParseFeeRate(DefaultFeeRateQOGE); err != nil || got != 10_000 {
+		t.Fatalf("default fee rate = (%d, %v), want (10000, nil)", got, err)
+	}
+}
+
+func TestPlanP2QPKFeeUsesFinalVSizeAndSummedInputs(t *testing.T) {
+	destination := make([]byte, 22) // P2WPKH output
+	for _, tc := range []struct {
+		name       string
+		inputs     int
+		total      int64
+		send       int64
+		rate       int64
+		wantChange int64
+	}{
+		{"single", 1, 200_000_000, 100_000_000, 10_000, 99_955_930},
+		{"two", 2, 300_000_000, 100_000_000, 10_000, 199_912_710},
+		{"four_higher_rate", 4, 500_000_000, 100_000_000, 25_000, 399_565_650},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := PlanP2QPKFee(tc.total, tc.send, tc.rate, tc.inputs, destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !plan.IncludeChange || plan.ChangeSats != tc.wantChange {
+				t.Fatalf("plan = %+v, want change %d", plan, tc.wantChange)
+			}
+			wantFee, err := FeeForRate(tc.rate, plan.VSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.FeeSats != wantFee || tc.total != tc.send+plan.FeeSats+plan.ChangeSats {
+				t.Fatalf("plan accounting mismatch: %+v", plan)
+			}
+		})
+	}
+}
+
+func TestPlanP2QPKFeeNoChangeUsesActualRemainder(t *testing.T) {
+	destination := make([]byte, 34)
+	noChangeVSize, err := P2QPKVirtualSize(2, []TxOutput{{Amount: 1, Script: destination}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimum, err := FeeForRate(10_000, noChangeVSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanP2QPKFee(100_000_000+minimum, 100_000_000, 10_000, 2, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.IncludeChange || plan.ChangeSats != 0 || plan.FeeSats != minimum || plan.VSize != noChangeVSize {
+		t.Fatalf("no-change plan = %+v", plan)
+	}
+}
+
+func bytesOf(value byte, length int) []byte {
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = value
+	}
+	return b
 }
 
 // ── P2QPKScript ───────────────────────────────────────────────────────────────

@@ -69,6 +69,10 @@ var ErrChangeOutputAmbiguous = errors.New("wallet: multiple outputs pay to the c
 // consumed must have been sent to the signing address.
 var ErrFromAddrScriptMismatch = errors.New("wallet: SpentUTXOs[InputIndex].Script does not match the P2QPK scriptPubKey for FromAddr")
 
+// ErrDuplicatePrevout is returned when more than one transaction input names
+// the same txid:vout, regardless of differences in nSequence.
+var ErrDuplicatePrevout = errors.New("wallet: duplicate transaction prevout")
+
 var (
 	ErrWalletAlreadyExists = errors.New("wallet: a wallet already exists at this path")
 	ErrWalletNotFound      = errors.New("wallet: no existing wallet found at this path")
@@ -737,7 +741,10 @@ func p2qpkTxID(params P2QPKSpendParams) string {
 	return hex.EncodeToString(second[:])
 }
 
-// SignP2QPKInput signs a P2QPK input per SIP-QOGE-PQC-02a §3.
+// SignP2QPKInput signs the input selected by params.InputIndex per
+// SIP-QOGE-PQC-02a §3. It is the compatibility wrapper for single-input
+// callers; the atomic batch implementation signs every input before advancing
+// the source lifecycle and returns the selected signature here.
 // params.FromAddr must be in FUNDED state.
 //
 // Change handling (two cases):
@@ -752,6 +759,19 @@ func p2qpkTxID(params P2QPKSpendParams) string {
 // The message signed is the 32-byte P2QPKSighash — NOT canonicalMessageHash,
 // which is only for the CLI generic message-signing demo (Open Item 4).
 func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, err error) {
+	pubKey, signatures, err := w.SignP2QPKInputs(params)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pubKey, signatures[params.InputIndex], nil
+}
+
+// SignP2QPKInputs signs every input in one atomic wallet operation. All input,
+// spent-script, and change-routing validation completes before any signature is
+// produced. The signing mutex remains held through every SLH-DSA operation, and
+// FUNDED -> SPEND_PENDING, change reservation, and spend-txid persistence occur
+// only after every input has a signature.
+func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) (pubKey []byte, signatures [][]byte, err error) {
 	w.signMu.Lock()
 	defer w.signMu.Unlock()
 	rec, err := w.index.GetRecord(params.FromAddr)
@@ -763,12 +783,14 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 			ErrFromAddressNotFunded, params.FromAddr, rec.State)
 	}
 
-	// Verify that SpentUTXOs[InputIndex].Script matches the P2QPK scriptPubKey
-	// for FromAddr. Without this check a caller could pass a UTXO script
-	// belonging to a different address; the wallet would sign with FromAddr's
-	// key, producing an invalid on-chain transaction while consuming the
-	// address's state.
-	if int(params.InputIndex) >= len(params.SpentUTXOs) {
+	if len(params.Inputs) == 0 {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: no inputs")
+	}
+	if len(params.Inputs) != len(params.SpentUTXOs) {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: Inputs len %d != SpentUTXOs len %d",
+			len(params.Inputs), len(params.SpentUTXOs))
+	}
+	if int(params.InputIndex) >= len(params.Inputs) {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: InputIndex %d out of range (SpentUTXOs len %d)",
 			params.InputIndex, len(params.SpentUTXOs))
 	}
@@ -776,8 +798,33 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", err)
 	}
-	if !bytes.Equal(params.SpentUTXOs[params.InputIndex].Script, fromScript) {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w", ErrFromAddrScriptMismatch)
+	// Validate every UTXO before signing. Otherwise a later mismatch could be
+	// discovered only after earlier, expensive signatures had been produced.
+	type prevout struct {
+		txid [32]byte
+		vout uint32
+	}
+	seenPrevouts := make(map[prevout]struct{}, len(params.Inputs))
+	for i, spent := range params.SpentUTXOs {
+		outpoint := prevout{txid: params.Inputs[i].TxIDLE, vout: params.Inputs[i].Vout}
+		if _, duplicate := seenPrevouts[outpoint]; duplicate {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: input %d: %w", i, ErrDuplicatePrevout)
+		}
+		seenPrevouts[outpoint] = struct{}{}
+		if spent.Amount <= 0 {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: input %d amount must be positive", i)
+		}
+		if !bytes.Equal(spent.Script, fromScript) {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: input %d: %w", i, ErrFromAddrScriptMismatch)
+		}
+	}
+	if len(params.Outputs) == 0 {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: no outputs")
+	}
+	for i, output := range params.Outputs {
+		if output.Amount < 0 {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: output %d amount is negative", i)
+		}
 	}
 
 	// Change routing: two valid cases depending on whether ChangeAddr is set.
@@ -822,9 +869,14 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		}
 	}
 
-	sighash, err := computeP2QPKSighash(params)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sighash: %w", err)
+	sighashes := make([][]byte, len(params.Inputs))
+	for i := range params.Inputs {
+		inputParams := params
+		inputParams.InputIndex = uint32(i)
+		sighashes[i], err = computeP2QPKSighash(inputParams)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: input %d sighash: %w", i, err)
+		}
 	}
 
 	rawSeed, err := w.index.DecryptSeed(rec.EncSeedBlob)
@@ -839,10 +891,14 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	}
 	defer s.Clean()
 
-	// Sign the raw 32-byte P2QPKSighash per §7-B: pure SLH-DSA, empty context, raw hash as message.
-	signature, err := s.Sign(sighash)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: sign: %w", err)
+	// Each input signs its own index-specific 32-byte P2QPKSighash. The hashes
+	// share the complete transaction context but are deliberately distinct.
+	signatures = make([][]byte, len(sighashes))
+	for i, sighash := range sighashes {
+		signatures[i], err = s.Sign(sighash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: input %d sign: %w", i, err)
+		}
 	}
 
 	spendTxID := p2qpkTxID(params)
@@ -850,7 +906,7 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: finalize lifecycle: %w", err)
 	}
 
-	return rec.PublicKey, signature, nil
+	return rec.PublicKey, signatures, nil
 }
 
 // computeP2QPKSighash implements SIP-QOGE-PQC-02a §3, mirroring
