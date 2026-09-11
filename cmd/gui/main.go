@@ -168,6 +168,20 @@ func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired bool) (visi
 	return visible, hidden
 }
 
+func filterTransactionRecords(records []wallet.TransactionRecord, hideOutgoing, hideIncoming bool) (visible []wallet.TransactionRecord, hidden int) {
+	visible = make([]wallet.TransactionRecord, 0, len(records))
+	for _, record := range records {
+		hide := hideOutgoing && record.Direction == wallet.TransactionOutgoing ||
+			hideIncoming && record.Direction == wallet.TransactionIncoming
+		if hide {
+			hidden++
+			continue
+		}
+		visible = append(visible, record)
+	}
+	return visible, hidden
+}
+
 const (
 	recipientModeWallet   = "Wallet address"
 	recipientModeExternal = "External address"
@@ -952,6 +966,8 @@ func main() {
 	historyScroll.SetMinSize(fyne.NewSize(0, 120))
 	historyStatus := widget.NewLabel("Transaction history is stored locally in this wallet.")
 	historyStatus.Wrapping = fyne.TextWrapWord
+	hideOutgoingCheck := widget.NewCheck("Hide OUTGOING", func(bool) { renderTransactions() })
+	hideIncomingCheck := widget.NewCheck("Hide INCOMING", func(bool) { renderTransactions() })
 	renderTransactions = func() {
 		if wlt == nil {
 			return
@@ -961,11 +977,14 @@ func main() {
 			historyStatus.SetText(fmt.Sprintf("History read failed: %v", err))
 			return
 		}
+		visible, hidden := filterTransactionRecords(records, hideOutgoingCheck.Checked, hideIncomingCheck.Checked)
 		historyList.RemoveAll()
 		if len(records) == 0 {
 			historyList.Add(widget.NewLabel("No recorded transactions yet."))
+		} else if len(visible) == 0 {
+			historyList.Add(widget.NewLabel("No transactions match the current filters."))
 		}
-		for _, record := range records {
+		for _, record := range visible {
 			record := record
 			copyTxID := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 				w.Clipboard().SetContent(record.TxID)
@@ -986,18 +1005,18 @@ func main() {
 			}
 			var details string
 			if record.Direction == wallet.TransactionOutgoing {
-				details = fmt.Sprintf("OUTGOING\nFrom: %s\nTo: %s (%s)\nAmount: %s QOGE\nFee: %s QOGE\nBroadcast by this wallet: %s", record.SourceAddress, record.Destination, record.DestinationType, rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.RecordedAt.Local().Format(time.RFC3339))
+				details = fmt.Sprintf("OUTGOING\nAmount: %s QOGE\nFee: %s QOGE\nFrom: %s\nTo: %s (%s)\nBroadcast by this wallet: %s", rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.SourceAddress, record.Destination, record.DestinationType, record.RecordedAt.Local().Format(time.RFC3339))
 			} else {
-				details = fmt.Sprintf("INCOMING\nReceived at: %s\nAmount: %s QOGE\nFirst recorded as FUNDED by Refresh: %s", record.Destination, rpcclient.FormatQOGE(record.AmountSats), record.RecordedAt.Local().Format(time.RFC3339))
+				details = fmt.Sprintf("INCOMING\nAmount: %s QOGE\nReceived at: %s\nFirst recorded as FUNDED by Refresh: %s", rpcclient.FormatQOGE(record.AmountSats), record.Destination, record.RecordedAt.Local().Format(time.RFC3339))
 			}
 			historyList.Add(widget.NewCard("", "", container.NewVBox(widget.NewLabel(details), container.NewBorder(nil, nil, nil, copyTxID, txid))))
 		}
 		historyList.Refresh()
-		historyStatus.SetText(fmt.Sprintf("%d recorded transaction(s), newest first. Confirmation status is not tracked here.", len(records)))
+		historyStatus.SetText(fmt.Sprintf("%d recorded transaction(s), %d hidden, newest first. Confirmation status is not tracked here.", len(records), hidden))
 	}
 	refreshHistoryBtn := widget.NewButtonWithIcon("Refresh history", theme.ViewRefreshIcon(), renderTransactions)
 	refreshHistoryBtn.Importance = widget.LowImportance
-	transactionsTab = container.NewTabItem("Transactions", container.NewBorder(container.NewVBox(pageTitle("Transactions"), pageIntro("Local write-once history anchored by transaction ID. Internal change is excluded."), container.NewCenter(refreshHistoryBtn)), historyStatus, nil, nil, historyScroll))
+	transactionsTab = container.NewTabItem("Transactions", container.NewBorder(container.NewVBox(pageTitle("Transactions"), pageIntro("Local write-once history anchored by transaction ID. Internal change is excluded."), container.NewHBox(hideOutgoingCheck, hideIncomingCheck), container.NewCenter(refreshHistoryBtn)), historyStatus, nil, nil, historyScroll))
 
 	// ── Send tab ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 	//

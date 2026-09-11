@@ -493,6 +493,38 @@ func TestFilterAddressInfos(t *testing.T) {
 	}
 }
 
+func TestFilterTransactionRecords(t *testing.T) {
+	records := []wallet.TransactionRecord{
+		{TxID: "incoming-1", Direction: wallet.TransactionIncoming},
+		{TxID: "outgoing-1", Direction: wallet.TransactionOutgoing},
+		{TxID: "incoming-2", Direction: wallet.TransactionIncoming},
+		{TxID: "outgoing-2", Direction: wallet.TransactionOutgoing},
+	}
+	for _, tc := range []struct {
+		name                       string
+		hideOutgoing, hideIncoming bool
+		want                       []string
+		wantHidden                 int
+	}{
+		{"show all", false, false, []string{"incoming-1", "outgoing-1", "incoming-2", "outgoing-2"}, 0},
+		{"hide outgoing", true, false, []string{"incoming-1", "incoming-2"}, 2},
+		{"hide incoming", false, true, []string{"outgoing-1", "outgoing-2"}, 2},
+		{"hide both", true, true, nil, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			visible, hidden := filterTransactionRecords(records, tc.hideOutgoing, tc.hideIncoming)
+			if hidden != tc.wantHidden || len(visible) != len(tc.want) {
+				t.Fatalf("visible/hidden = %d/%d, want %d/%d", len(visible), hidden, len(tc.want), tc.wantHidden)
+			}
+			for i, want := range tc.want {
+				if visible[i].TxID != want {
+					t.Fatalf("visible[%d] = %q, want %q", i, visible[i].TxID, want)
+				}
+			}
+		})
+	}
+}
+
 func TestShowSpentRetiredCheckboxTapTogglesFilter(t *testing.T) {
 	infos := []wallet.AddressInfo{
 		{State: keystore.StateFresh},
