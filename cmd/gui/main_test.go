@@ -44,6 +44,26 @@ func TestReadRPCCookie(t *testing.T) {
 	}
 }
 
+func TestTransactionExplorerURL(t *testing.T) {
+	txid := "0494047ba80e18725916c5e83eb46d2de3a9ffda970e96971d96d9979369d90a"
+	got, err := transactionExplorerURL(txid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://explorer.qoge.org/tx/" + txid
+	if got.String() != want {
+		t.Fatalf("explorer URL = %q, want %q", got.String(), want)
+	}
+}
+
+func TestTransactionExplorerURLRejectsInvalidStoredTxID(t *testing.T) {
+	for _, txid := range []string{"", "outgoing-txid", strings.Repeat("0", 63), strings.Repeat("z", 64)} {
+		if got, err := transactionExplorerURL(txid); err == nil {
+			t.Fatalf("transactionExplorerURL(%q) = %v, want error", txid, got)
+		}
+	}
+}
+
 func TestPrepareSpendInputsAggregatesEveryUTXO(t *testing.T) {
 	for _, count := range []int{2, 4} {
 		t.Run(fmt.Sprintf("%d_utxos", count), func(t *testing.T) {

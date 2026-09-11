@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,6 +39,7 @@ const (
 	localMainnetRPCEndpoint = "127.0.0.1:8332"
 	localRPCProbeTimeout    = 2 * time.Second
 	rpcCookieUsername       = "__cookie__"
+	transactionExplorerBase = "https://explorer.qoge.org/tx/"
 )
 
 type rpcCookie struct {
@@ -295,6 +297,14 @@ func prepareSpendInputs(unspents []rpcclient.ScanUnspent) (preparedSpendInputs, 
 		prepared.TotalSats += sats
 	}
 	return prepared, nil
+}
+
+func transactionExplorerURL(txid string) (*url.URL, error) {
+	decoded, err := hex.DecodeString(txid)
+	if err != nil || len(decoded) != 32 || len(txid) != 64 {
+		return nil, fmt.Errorf("invalid transaction ID")
+	}
+	return url.Parse(transactionExplorerBase + txid)
 }
 
 func broadcastAndRecord(send func() (string, error), record func(string) error) (txid string, historyErr error, err error) {
@@ -962,9 +972,18 @@ func main() {
 				historyStatus.SetText("Transaction ID copied to clipboard.")
 			})
 			copyTxID.Importance = widget.LowImportance
-			txid := widget.NewLabel(record.TxID)
-			txid.TextStyle = fyne.TextStyle{Monospace: true}
-			txid.Wrapping = fyne.TextWrapBreak
+			var txid fyne.CanvasObject
+			explorerURL, urlErr := transactionExplorerURL(record.TxID)
+			if urlErr == nil {
+				link := widget.NewHyperlink(record.TxID, explorerURL)
+				link.TextStyle = fyne.TextStyle{Monospace: true}
+				txid = link
+			} else {
+				label := widget.NewLabel(record.TxID)
+				label.TextStyle = fyne.TextStyle{Monospace: true}
+				label.Wrapping = fyne.TextWrapBreak
+				txid = label
+			}
 			var details string
 			if record.Direction == wallet.TransactionOutgoing {
 				details = fmt.Sprintf("OUTGOING\nFrom: %s\nTo: %s (%s)\nAmount: %s QOGE\nFee: %s QOGE\nBroadcast by this wallet: %s", record.SourceAddress, record.Destination, record.DestinationType, rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.RecordedAt.Local().Format(time.RFC3339))
