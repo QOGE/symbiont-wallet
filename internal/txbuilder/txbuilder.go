@@ -44,6 +44,14 @@ type P2QPKFeePlan struct {
 	IncludeChange bool
 }
 
+// P2QPKWithdrawAllPlan describes a deliberate one-output transaction that
+// sends the complete input total minus its exact vsize-based fee.
+type P2QPKWithdrawAllPlan struct {
+	SendSats int64
+	FeeSats  int64
+	VSize    int64
+}
+
 // P2QPKWitness is the witness stack for one P2QPK input.
 // Witness stack layout (BIP144 order, bottom to top):
 //   - witness[0] = Sig    (17088 bytes SLH-DSA signature, popped second by interpreter)
@@ -226,6 +234,30 @@ func PlanP2QPKFee(totalInputSats, sendSats, rateSatsPerKB int64, inputCount int,
 		return P2QPKFeePlan{FeeSats: changeFee, ChangeSats: remainder - changeFee, VSize: changeVSize, IncludeChange: true}, nil
 	}
 	return P2QPKFeePlan{FeeSats: remainder, VSize: noChangeVSize}, nil
+}
+
+// PlanP2QPKWithdrawAll plans a transaction with exactly one destination output
+// and no change. Output amounts always occupy eight serialized bytes, so the
+// final vsize is known before SendSats is derived.
+func PlanP2QPKWithdrawAll(totalInputSats, rateSatsPerKB int64, inputCount int, destinationScript []byte) (P2QPKWithdrawAllPlan, error) {
+	if totalInputSats <= 0 {
+		return P2QPKWithdrawAllPlan{}, fmt.Errorf("txbuilder: total input must be positive")
+	}
+	if len(destinationScript) == 0 {
+		return P2QPKWithdrawAllPlan{}, fmt.Errorf("txbuilder: destination script is empty")
+	}
+	vsize, err := P2QPKVirtualSize(inputCount, []TxOutput{{Script: destinationScript}})
+	if err != nil {
+		return P2QPKWithdrawAllPlan{}, err
+	}
+	fee, err := FeeForRate(rateSatsPerKB, vsize)
+	if err != nil {
+		return P2QPKWithdrawAllPlan{}, err
+	}
+	if totalInputSats <= fee {
+		return P2QPKWithdrawAllPlan{}, fmt.Errorf("txbuilder: insufficient funds: total input %d does not exceed fee %d", totalInputSats, fee)
+	}
+	return P2QPKWithdrawAllPlan{SendSats: totalInputSats - fee, FeeSats: fee, VSize: vsize}, nil
 }
 
 // TxIDLEFromHex converts a txid from RPC display format (64 hex chars,

@@ -264,6 +264,65 @@ type preparedSpendInputs struct {
 	TotalSats    int64
 }
 
+type preparedSendAmounts struct {
+	SendSats          int64
+	FeeSats           int64
+	VSize             int64
+	ChangeSats        int64
+	IncludeChange     bool
+	WithdrawAll       bool
+	DestinationScript []byte
+}
+
+func prepareSendAmounts(totalSats int64, inputCount int, destinationScript []byte, feeRateSats int64, amountText string, withdrawAll bool) (preparedSendAmounts, error) {
+	frozenScript := append([]byte(nil), destinationScript...)
+	if withdrawAll {
+		plan, err := txbuilder.PlanP2QPKWithdrawAll(totalSats, feeRateSats, inputCount, frozenScript)
+		if err != nil {
+			return preparedSendAmounts{}, err
+		}
+		return preparedSendAmounts{SendSats: plan.SendSats, FeeSats: plan.FeeSats, VSize: plan.VSize, WithdrawAll: true, DestinationScript: frozenScript}, nil
+	}
+	sendSats, err := txbuilder.QOGEToSatoshis(amountText)
+	if err != nil || sendSats <= 0 {
+		return preparedSendAmounts{}, fmt.Errorf("invalid amount: %v", err)
+	}
+	plan, err := txbuilder.PlanP2QPKFee(totalSats, sendSats, feeRateSats, inputCount, frozenScript)
+	if err != nil {
+		return preparedSendAmounts{}, err
+	}
+	return preparedSendAmounts{SendSats: sendSats, FeeSats: plan.FeeSats, VSize: plan.VSize, ChangeSats: plan.ChangeSats, IncludeChange: plan.IncludeChange, DestinationScript: frozenScript}, nil
+}
+
+type withdrawAllAmountControl struct {
+	entry       *widget.Entry
+	manualValue string
+	enabled     bool
+}
+
+func (control *withdrawAllAmountControl) setEnabled(enabled bool) {
+	if enabled == control.enabled {
+		return
+	}
+	control.enabled = enabled
+	if enabled {
+		control.manualValue = control.entry.Text
+		control.entry.SetText("")
+		control.entry.SetPlaceHolder("Calculated from all UTXOs")
+		control.entry.Disable()
+		return
+	}
+	control.entry.Enable()
+	control.entry.SetPlaceHolder("e.g. 1 or 0.5")
+	control.entry.SetText(control.manualValue)
+}
+
+func (control *withdrawAllAmountControl) setCalculated(sats int64) {
+	if control.enabled {
+		control.entry.SetText(rpcclient.FormatQOGE(sats))
+	}
+}
+
 func prepareSpendInputs(unspents []rpcclient.ScanUnspent) (preparedSpendInputs, error) {
 	if len(unspents) == 0 {
 		return preparedSpendInputs{}, fmt.Errorf("no UTXOs")
@@ -1079,6 +1138,8 @@ func main() {
 	amountEntry := widget.NewEntry()
 	amountEntry.SetPlaceHolder("e.g. 1 or 0.5")
 	amountField := container.NewGridWrap(fyne.NewSize(180, amountEntry.MinSize().Height), amountEntry)
+	withdrawAllControl := &withdrawAllAmountControl{entry: amountEntry}
+	withdrawAllCheck := widget.NewCheck("Withdraw all & subtract fee from amount", nil)
 	feeRateEntry := widget.NewEntry()
 	feeRateEntry.SetText(txbuilder.DefaultFeeRateQOGE)
 	feeRateField := container.NewGridWrap(fyne.NewSize(180, feeRateEntry.MinSize().Height), feeRateEntry)
@@ -1263,6 +1324,51 @@ func main() {
 		return balanceErr
 	}
 
+	estimateWithdrawAll := func() error {
+		if rpc == nil {
+			return fmt.Errorf("connect to a node before calculating Withdraw All")
+		}
+		fromAddr, selected := resolveSendFromOption(sendFromSelect.Selected, sendFromOptionAddresses)
+		if !selected {
+			return fmt.Errorf("select a From address before calculating Withdraw All")
+		}
+		_, destination, err := resolveSendDestination(recipientMode.Selected == recipientModeExternal, sendToSelect.Selected, externalToEntry.Text)
+		if err != nil {
+			return fmt.Errorf("select a valid destination before calculating Withdraw All: %w", err)
+		}
+		feeRateSats, err := txbuilder.ParseFeeRate(feeRateEntry.Text)
+		if err != nil {
+			return fmt.Errorf("invalid fee rate: %w", err)
+		}
+		scanResult, err := rpc.ScanTxOutSet(context.Background(), []string{"addr(" + fromAddr + ")"})
+		if err != nil {
+			return fmt.Errorf("scantxoutset: %w", err)
+		}
+		prepared, err := prepareSpendInputs(scanResult.Unspents)
+		if err != nil {
+			return fmt.Errorf("prepare UTXOs: %w", err)
+		}
+		plan, err := txbuilder.PlanP2QPKWithdrawAll(prepared.TotalSats, feeRateSats, len(prepared.WalletInputs), destination.ScriptPubKey)
+		if err != nil {
+			return err
+		}
+		withdrawAllControl.setCalculated(plan.SendSats)
+		return nil
+	}
+	withdrawAllCheck.OnChanged = func(checked bool) {
+		withdrawAllControl.setEnabled(checked)
+		if !checked {
+			sendStatusLabel.SetText("Withdraw All disabled — manual amount restored.")
+			return
+		}
+		sendStatusLabel.SetText("Calculating Withdraw All amount from current UTXOs...")
+		if err := estimateWithdrawAll(); err != nil {
+			sendStatusLabel.SetText(fmt.Sprintf("Withdraw All amount will be calculated during Preview: %v", err))
+			return
+		}
+		sendStatusLabel.SetText("Withdraw All amount calculated. Preview will fetch UTXOs again and verify the final amount.")
+	}
+
 	previewBtn := widget.NewButton("Preview Transaction", func() {
 		broadcastGate.Reset(broadcastBtn)
 		if wlt == nil {
@@ -1290,11 +1396,6 @@ func main() {
 			sendStatusLabel.SetText(fmt.Sprintf("Invalid destination: %v", err))
 			return
 		}
-		sendSats, err := txbuilder.QOGEToSatoshis(amountEntry.Text)
-		if err != nil || sendSats <= 0 {
-			sendStatusLabel.SetText(fmt.Sprintf("Invalid amount: %v", err))
-			return
-		}
 		feeRateSats, err := txbuilder.ParseFeeRate(feeRateEntry.Text)
 		if err != nil {
 			sendStatusLabel.SetText(fmt.Sprintf("Invalid fee rate: %v", err))
@@ -1311,16 +1412,20 @@ func main() {
 			sendStatusLabel.SetText(fmt.Sprintf("Cannot prepare UTXOs: %v", err))
 			return
 		}
-		toScript := append([]byte(nil), toDestination.ScriptPubKey...)
-		feePlan, err := txbuilder.PlanP2QPKFee(prepared.TotalSats, sendSats, feeRateSats, len(prepared.WalletInputs), toScript)
+		amounts, err := prepareSendAmounts(prepared.TotalSats, len(prepared.WalletInputs), toDestination.ScriptPubKey, feeRateSats, amountEntry.Text, withdrawAllCheck.Checked)
 		if err != nil {
 			sendStatusLabel.SetText(err.Error())
 			return
 		}
+		sendSats := amounts.SendSats
+		toScript := amounts.DestinationScript
+		if amounts.WithdrawAll {
+			withdrawAllControl.setCalculated(sendSats)
+		}
 		var changeAddr string
 		spendOutputs := []wallet.SpendOutput{{Amount: sendSats, Script: toScript}}
 		txOutputs := []txbuilder.TxOutput{{Amount: sendSats, Script: toScript}}
-		if feePlan.IncludeChange {
+		if amounts.IncludeChange {
 			changeAddr, err = wlt.NextReceiveAddress()
 			if err != nil {
 				sendStatusLabel.SetText(fmt.Sprintf("Cannot select change address: %v", err))
@@ -1335,8 +1440,8 @@ func main() {
 				sendStatusLabel.SetText(fmt.Sprintf("change script error: %v", err))
 				return
 			}
-			spendOutputs = append(spendOutputs, wallet.SpendOutput{Amount: feePlan.ChangeSats, Script: changeScript})
-			txOutputs = append(txOutputs, txbuilder.TxOutput{Amount: feePlan.ChangeSats, Script: changeScript})
+			spendOutputs = append(spendOutputs, wallet.SpendOutput{Amount: amounts.ChangeSats, Script: changeScript})
+			txOutputs = append(txOutputs, txbuilder.TxOutput{Amount: amounts.ChangeSats, Script: changeScript})
 		}
 		var utxoLines strings.Builder
 		for i, utxo := range prepared.UTXOs {
@@ -1344,9 +1449,15 @@ func main() {
 				i+1, utxo.TxID, utxo.Vout, rpcclient.FormatQOGE(utxo.Sats), utxo.Sats)
 		}
 		changeLines := "Change:      none\n"
-		if feePlan.IncludeChange {
+		if amounts.IncludeChange {
 			changeLines = fmt.Sprintf("Change:      %s QOGE  (%d sat)\n  → to:     %s\n",
-				rpcclient.FormatQOGE(feePlan.ChangeSats), feePlan.ChangeSats, changeAddr)
+				rpcclient.FormatQOGE(amounts.ChangeSats), amounts.ChangeSats, changeAddr)
+		}
+		withdrawAllLine := "Withdraw all: no\n"
+		amountLabel := "Amount:      "
+		if amounts.WithdrawAll {
+			withdrawAllLine = "Withdraw all: yes (fee subtracted from amount)\n"
+			amountLabel = "Final amount:"
 		}
 		previewText := fmt.Sprintf(
 			"From:        %s\n\n"+
@@ -1355,7 +1466,8 @@ func main() {
 				"Inputs:      %d UTXO(s)\n"+
 				"Total input: %s QOGE  (%d sat)\n"+
 				"UTXOs:\n%s\n"+
-				"Amount:      %s QOGE  (%d sat)\n"+
+				"%s"+
+				"%s %s QOGE  (%d sat)\n"+
 				"Fee rate:    %s QOGE/kB\n"+
 				"Final vsize: %d vB\n"+
 				"Actual fee:  %s QOGE  (%d sat)\n"+
@@ -1366,9 +1478,10 @@ func main() {
 				"   Broadcast Transaction button.",
 			fromAddr, toAddr, toDestination.Type,
 			len(prepared.UTXOs), rpcclient.FormatQOGE(prepared.TotalSats), prepared.TotalSats, utxoLines.String(),
+			withdrawAllLine, amountLabel,
 			rpcclient.FormatQOGE(sendSats), sendSats,
-			rpcclient.FormatQOGE(feeRateSats), feePlan.VSize,
-			rpcclient.FormatQOGE(feePlan.FeeSats), feePlan.FeeSats,
+			rpcclient.FormatQOGE(feeRateSats), amounts.VSize,
+			rpcclient.FormatQOGE(amounts.FeeSats), amounts.FeeSats,
 			changeLines,
 		)
 		content := widget.NewLabel(previewText)
@@ -1410,16 +1523,16 @@ func main() {
 			signedTxHex = hex.EncodeToString(raw)
 			broadcastContext = signedBroadcastContext{
 				rawHex: signedTxHex, source: fromAddr, destination: toAddr,
-				destinationType: toDestination.Type, amountSats: sendSats, feeSats: feePlan.FeeSats,
+				destinationType: toDestination.Type, amountSats: sendSats, feeSats: amounts.FeeSats,
 			}
 			preview := fmt.Sprintf("%d bytes / %d vB / %d inputs / %d hex chars\n%s…\n…%s",
-				len(raw), feePlan.VSize, len(prepared.TxInputs), len(signedTxHex),
+				len(raw), amounts.VSize, len(prepared.TxInputs), len(signedTxHex),
 				signedTxHex[:64], signedTxHex[len(signedTxHex)-64:])
 			rawHexPreviewLabel.SetText(preview)
 			statusMsg := fmt.Sprintf("Signed %d inputs — %d bytes raw tx, %d vB, fee %s QOGE.\n"+
 				"From address is now SPEND_PENDING until Refresh detects at least 1 on-chain confirmation.\n",
-				len(prepared.TxInputs), len(raw), feePlan.VSize, rpcclient.FormatQOGE(feePlan.FeeSats))
-			if feePlan.IncludeChange {
+				len(prepared.TxInputs), len(raw), amounts.VSize, rpcclient.FormatQOGE(amounts.FeeSats))
+			if amounts.IncludeChange {
 				statusMsg += fmt.Sprintf("Change address %s is reserved until its balance reaches %d confirmations.\n", changeAddr, wallet.FundingMinConfirmations)
 			}
 			statusMsg += "Run Test Transaction successfully to enable Broadcast Transaction."
@@ -1466,7 +1579,7 @@ func main() {
 			externalToLabel,
 			externalToEntry,
 			externalValidationLabel,
-			widget.NewLabel("Amount (QOGE):"),
+			container.NewHBox(widget.NewLabel("Amount (QOGE):"), withdrawAllCheck),
 			transactionActionRow,
 			feeRateLabel,
 			feeRateField,

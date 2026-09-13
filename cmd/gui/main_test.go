@@ -21,6 +21,7 @@ import (
 
 	qogeaddress "github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/internal/rpcclient"
+	"github.com/saogen/qoge-sphincs-wallet/internal/txbuilder"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	"github.com/saogen/qoge-sphincs-wallet/wallet"
 )
@@ -108,6 +109,71 @@ func TestPrepareSpendInputsRejectsDuplicateOutpoint(t *testing.T) {
 	}
 	if _, err := prepareSpendInputs([]rpcclient.ScanUnspent{unspent, unspent}); err == nil {
 		t.Fatal("duplicate outpoint accepted")
+	}
+}
+
+func TestWithdrawAllAmountControlDisablesPopulatesAndRestoresManualValue(t *testing.T) {
+	entry := widget.NewEntry()
+	entry.SetText("12.345")
+	control := &withdrawAllAmountControl{entry: entry}
+	check := widget.NewCheck("Withdraw all", control.setEnabled)
+
+	fynetest.Tap(check)
+	if !entry.Disabled() || entry.Text != "" {
+		t.Fatalf("checked entry = disabled %v text %q, want true/empty", entry.Disabled(), entry.Text)
+	}
+	control.setCalculated(123_400_000)
+	if entry.Text != "1.23400000" {
+		t.Fatalf("calculated text = %q, want 1.23400000", entry.Text)
+	}
+
+	fynetest.Tap(check)
+	if entry.Disabled() || entry.Text != "12.345" {
+		t.Fatalf("unchecked entry = disabled %v text %q, want false/12.345", entry.Disabled(), entry.Text)
+	}
+}
+
+func TestPrepareSendAmountsWithdrawAllIsFrozenAndHasNoChange(t *testing.T) {
+	destinationScript := []byte{0x00, 0x14, 0x01, 0x02}
+	amountEntry := widget.NewEntry()
+	amountEntry.SetText("ignored in Withdraw All mode")
+	plan, err := prepareSendAmounts(500_000_000, 3, destinationScript, 10_000, amountEntry.Text, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amountEntry.SetText("0.00000001")
+	destinationScript[0] = 0xff
+	if plan.DestinationScript[0] != 0x00 {
+		t.Fatal("prepared destination script aliases the mutable source")
+	}
+	if !plan.WithdrawAll || plan.IncludeChange || plan.ChangeSats != 0 {
+		t.Fatalf("withdraw-all plan has change: %+v", plan)
+	}
+	if plan.SendSats+plan.FeeSats != 500_000_000 {
+		t.Fatalf("accounting: send %d + fee %d != total", plan.SendSats, plan.FeeSats)
+	}
+	wantVSize, err := txbuilder.P2QPKVirtualSize(3, []txbuilder.TxOutput{{Amount: plan.SendSats, Script: plan.DestinationScript}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.VSize != wantVSize {
+		t.Fatalf("vsize = %d, want %d", plan.VSize, wantVSize)
+	}
+}
+
+func TestPrepareSendAmountsManualModeUsesExistingFeePlanner(t *testing.T) {
+	script := make([]byte, 22)
+	got, err := prepareSendAmounts(300_000_000, 2, script, 10_000, "1.25", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := txbuilder.PlanP2QPKFee(300_000_000, 125_000_000, 10_000, 2, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WithdrawAll || got.SendSats != 125_000_000 || got.FeeSats != want.FeeSats ||
+		got.VSize != want.VSize || got.ChangeSats != want.ChangeSats || got.IncludeChange != want.IncludeChange {
+		t.Fatalf("manual prepared amounts = %+v, existing planner = %+v", got, want)
 	}
 }
 

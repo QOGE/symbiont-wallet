@@ -479,6 +479,62 @@ func TestPlanP2QPKFeeNoChangeUsesActualRemainder(t *testing.T) {
 	}
 }
 
+func TestPlanP2QPKWithdrawAllExactAccountingAndVSize(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		inputs     int
+		total      int64
+		rate       int64
+		scriptSize int
+	}{
+		{"single_p2pkh", 1, 100_000_000, 10_000, 25},
+		{"two_p2sh", 2, 300_000_000, 25_000, 23},
+		{"four_p2wpkh", 4, 900_000_000, 50_000, 22},
+		{"single_p2wsh", 1, 100_000_000, 10_000, 34},
+		{"two_p2tr", 2, 300_000_000, 25_000, 34},
+		{"four_p2qpk", 4, 900_000_000, 50_000, 34},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := make([]byte, tc.scriptSize)
+			plan, err := PlanP2QPKWithdrawAll(tc.total, tc.rate, tc.inputs, script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantVSize, err := P2QPKVirtualSize(tc.inputs, []TxOutput{{Amount: plan.SendSats, Script: script}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantFee, err := FeeForRate(tc.rate, wantVSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.VSize != wantVSize || plan.FeeSats != wantFee {
+				t.Fatalf("plan = %+v, want vsize=%d fee=%d", plan, wantVSize, wantFee)
+			}
+			if tc.total != plan.SendSats+plan.FeeSats {
+				t.Fatalf("accounting: total %d != send %d + fee %d", tc.total, plan.SendSats, plan.FeeSats)
+			}
+		})
+	}
+}
+
+func TestPlanP2QPKWithdrawAllRejectsFeeAtOrAboveTotal(t *testing.T) {
+	script := make([]byte, 34)
+	vsize, err := P2QPKVirtualSize(1, []TxOutput{{Script: script}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fee, err := FeeForRate(10_000, vsize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, total := range []int64{fee, fee - 1} {
+		if _, err := PlanP2QPKWithdrawAll(total, 10_000, 1, script); err == nil {
+			t.Fatalf("total %d accepted with fee %d", total, fee)
+		}
+	}
+}
+
 func bytesOf(value byte, length int) []byte {
 	b := make([]byte, length)
 	for i := range b {
