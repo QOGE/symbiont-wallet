@@ -1143,8 +1143,9 @@ func main() {
 	feeRateEntry := widget.NewEntry()
 	feeRateEntry.SetText(txbuilder.DefaultFeeRateQOGE)
 	feeRateField := container.NewGridWrap(fyne.NewSize(180, feeRateEntry.MinSize().Height), feeRateEntry)
-	feeRateLabel := widget.NewLabel("Fee rate (QOGE/kB): A too-low fee may result in a slow or never-confirming transaction.")
-	feeRateLabel.Wrapping = fyne.TextWrapWord
+	feeRateLabel := widget.NewLabel("Custom fee rate (QOGE/kB):")
+	feeRateHelp := widget.NewLabel("Set custom fee only if the default fee is too low and results in a slow or never-confirming transaction.")
+	feeRateHelp.Wrapping = fyne.TextWrapWord
 
 	sendStatusLabel := widget.NewLabel("")
 	sendStatusLabel.Wrapping = fyne.TextWrapWord
@@ -1582,7 +1583,7 @@ func main() {
 			container.NewHBox(widget.NewLabel("Amount (QOGE):"), withdrawAllCheck),
 			transactionActionRow,
 			feeRateLabel,
-			feeRateField,
+			container.NewHBox(feeRateField, feeRateHelp),
 			widget.NewSeparator(),
 			widget.NewLabel("Signed transaction hex:"),
 			rawHexPreviewLabel,
