@@ -1,7 +1,7 @@
 // cmd/gui/main.go — Fyne GUI for Symbiont Wallet
 //
-// Five tabs: Wallet lifecycle, address state tracking, local transaction history,
-// transaction construction, and Network RPC setup.
+// Six tabs: Wallet lifecycle, address state tracking, local transaction history,
+// explicit SPENT-address recovery, transaction construction, and Network RPC setup.
 package main
 
 import (
@@ -372,6 +372,34 @@ func prepareSpendInputs(unspents []rpcclient.ScanUnspent) (preparedSpendInputs, 
 	return prepared, nil
 }
 
+func validateRecoveryTransactionSize(inputCount int, destinationScript []byte) error {
+	_, err := txbuilder.ValidateP2QPKStandardSize(inputCount, destinationScript)
+	if err != nil {
+		return fmt.Errorf("recovery has %d inputs; safe maximum is %d: %w", inputCount, txbuilder.P2QPKSafeMaxInputs, err)
+	}
+	return nil
+}
+
+func recoverableOutpoints(result rpcclient.ScanResult, addr string) ([]keystore.RecoveryOutpoint, error) {
+	script, err := txbuilder.P2QPKScript(addr)
+	if err != nil {
+		return nil, err
+	}
+	scriptHex := hex.EncodeToString(script)
+	var outpoints []keystore.RecoveryOutpoint
+	for _, unspent := range result.Unspents {
+		if unspent.ScriptPubKey != scriptHex {
+			continue
+		}
+		sats, err := rpcclient.FloatQOGEToSatoshis(unspent.Amount)
+		if err != nil || sats <= 0 || len(unspent.Txid) != 64 {
+			return nil, fmt.Errorf("invalid recoverable UTXO %s:%d", unspent.Txid, unspent.Vout)
+		}
+		outpoints = append(outpoints, keystore.RecoveryOutpoint{TxID: unspent.Txid, Vout: unspent.Vout, AmountSats: sats})
+	}
+	return outpoints, nil
+}
+
 func transactionExplorerURL(txid string) (*url.URL, error) {
 	decoded, err := hex.DecodeString(txid)
 	if err != nil || len(decoded) != 32 || len(txid) != 64 {
@@ -388,10 +416,11 @@ func broadcastAndRecord(send func() (string, error), record func(string) error) 
 	return txid, record(txid), nil
 }
 
-func newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
-	tabs := container.NewAppTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
+func newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
+	tabs := container.NewAppTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
 	tabs.DisableItem(addressesTab)
 	tabs.DisableItem(transactionsTab)
+	tabs.DisableItem(recoveryTab)
 	tabs.DisableItem(sendTab)
 	return tabs
 }
@@ -487,10 +516,10 @@ func main() {
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
-	var addressesTab, transactionsTab, sendTab *container.TabItem
+	var addressesTab, transactionsTab, recoveryTab, sendTab *container.TabItem
 	var rpcFooterStatus *widget.Label
 	var renderTransactions func()
-	var addressesNavBtn, transactionsNavBtn, sendNavBtn *widget.Button
+	var addressesNavBtn, transactionsNavBtn, recoveryNavBtn, sendNavBtn *widget.Button
 
 	// ── Wallet tab ──────────────────────────────────────────────────────────────
 
@@ -578,6 +607,7 @@ func main() {
 		if tabs != nil {
 			tabs.EnableItem(addressesTab)
 			tabs.EnableItem(transactionsTab)
+			tabs.EnableItem(recoveryTab)
 			tabs.EnableItem(sendTab)
 		}
 		if addressesNavBtn != nil {
@@ -588,6 +618,9 @@ func main() {
 		}
 		if transactionsNavBtn != nil {
 			transactionsNavBtn.Enable()
+		}
+		if recoveryNavBtn != nil {
+			recoveryNavBtn.Enable()
 		}
 		if renderTransactions != nil {
 			renderTransactions()
@@ -937,6 +970,52 @@ func main() {
 		}
 
 		if rpc != nil {
+			var spentAddresses []string
+			for _, info := range infos {
+				if info.State == keystore.StateSpent {
+					spentAddresses = append(spentAddresses, info.Address)
+				}
+			}
+			if len(spentAddresses) > 0 {
+				descriptors := make([]string, len(spentAddresses))
+				for i, addr := range spentAddresses {
+					descriptors[i] = "addr(" + addr + ")"
+				}
+				spentScan, scanErr := rpc.ScanTxOutSet(context.Background(), descriptors)
+				if scanErr != nil {
+					if balanceErr == "" {
+						balanceErr = fmt.Sprintf("Recovery balance lookup failed: %v", scanErr)
+					}
+				} else if statuses, analyzeErr := rpcclient.AnalyzeFunding(spentScan, spentAddresses); analyzeErr != nil {
+					if balanceErr == "" {
+						balanceErr = fmt.Sprintf("Recovery funding analysis failed: %v", analyzeErr)
+					}
+				} else {
+					for _, addr := range spentAddresses {
+						outpoints, outpointErr := recoverableOutpoints(spentScan, addr)
+						if outpointErr != nil {
+							if balanceErr == "" {
+								balanceErr = fmt.Sprintf("Recovery UTXO analysis failed: %v", outpointErr)
+							}
+							break
+						}
+						status := statuses[addr]
+						if _, observeErr := wlt.ObserveRecoverableBalance(addr, status.BalanceSats, status.Confirmations, outpoints); observeErr != nil {
+							if balanceErr == "" {
+								balanceErr = fmt.Sprintf("Recovery state update failed: %v", observeErr)
+							}
+							break
+						}
+					}
+					infos, err = wlt.ListAddresses()
+					if err != nil && balanceErr == "" {
+						balanceErr = fmt.Sprintf("Address reload after recovery detection failed: %v", err)
+					}
+				}
+			}
+		}
+
+		if rpc != nil {
 			for _, info := range infos {
 				if info.State != keystore.StateSpendPending {
 					continue
@@ -1076,6 +1155,208 @@ func main() {
 	refreshHistoryBtn := widget.NewButtonWithIcon("Refresh history", theme.ViewRefreshIcon(), renderTransactions)
 	refreshHistoryBtn.Importance = widget.LowImportance
 	transactionsTab = container.NewTabItem("Transactions", container.NewBorder(container.NewVBox(pageTitle("Transactions"), pageIntro("Local write-once history anchored by transaction ID. Internal change is excluded."), container.NewHBox(hideOutgoingCheck, hideIncomingCheck), container.NewCenter(refreshHistoryBtn)), historyStatus, nil, nil, historyScroll))
+
+	// ── Recover from Spent tab ─────────────────────────────────────────────
+	recoverySource := widget.NewSelect(nil, nil)
+	recoveryDestination := widget.NewEntry()
+	recoveryDestination.SetPlaceHolder("Validated external or wallet-owned mainnet address")
+	recoveryFeeRate := widget.NewEntry()
+	recoveryFeeRate.SetText(txbuilder.DefaultFeeRateQOGE)
+	recoveryStatus := widget.NewLabel("Refresh My Addresses to detect mature recoverable balances.")
+	recoveryStatus.Wrapping = fyne.TextWrapWord
+	recoveryRawPreview := widget.NewLabel("")
+	recoveryRawPreview.TextStyle = fyne.TextStyle{Monospace: true}
+	recoveryRawPreview.Wrapping = fyne.TextWrapBreak
+	var recoverySignedHex string
+	var recoveryContext signedBroadcastContext
+	recoveryGate := &broadcastGate{}
+	recoveryBroadcastBtn := widget.NewButton("Broadcast Recovery Transaction", nil)
+	recoveryBroadcastBtn.Importance = widget.DangerImportance
+	recoveryBroadcastBtn.Disable()
+
+	refreshRecoverySources := func() error {
+		if wlt == nil {
+			return fmt.Errorf("open a wallet first")
+		}
+		infos, err := wlt.ListAddresses()
+		if err != nil {
+			return err
+		}
+		previous := recoverySource.Selected
+		var options []string
+		for _, info := range infos {
+			if info.State == keystore.StateSpent && info.HasRecoverableBalance && len(info.RecoveryPendingOutpoints) == 0 {
+				options = append(options, info.Address)
+			}
+		}
+		recoverySource.Options = options
+		recoverySource.Selected = ""
+		for _, option := range options {
+			if option == previous {
+				recoverySource.Selected = previous
+				break
+			}
+		}
+		recoverySource.Refresh()
+		return nil
+	}
+
+	recoveryRefreshBtn := widget.NewButtonWithIcon("Refresh recovery list", theme.ViewRefreshIcon(), func() {
+		if err := refreshRecoverySources(); err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Recovery refresh failed: %v", err))
+			return
+		}
+		recoveryStatus.SetText(fmt.Sprintf("%d recoverable SPENT address(es).", len(recoverySource.Options)))
+	})
+	recoveryRefreshBtn.Importance = widget.LowImportance
+
+	recoveryTestBtn := widget.NewButton("Test Recovery Transaction", func() {
+		recoveryGate.Reset(recoveryBroadcastBtn)
+		if recoverySignedHex == "" || rpc == nil {
+			recoveryStatus.SetText("A signed recovery transaction and node connection are required.")
+			return
+		}
+		result, err := rpc.TestMempoolAccept(context.Background(), recoverySignedHex)
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("testmempoolaccept RPC error: %v", err))
+			return
+		}
+		if !result.Allowed {
+			recoveryStatus.SetText(fmt.Sprintf("Recovery transaction rejected: %s", result.RejectReason))
+			return
+		}
+		recoveryGate.RecordMempoolResult(recoverySignedHex, true, recoveryBroadcastBtn)
+		recoveryStatus.SetText(fmt.Sprintf("Recovery transaction ALLOWED: vsize=%d, fee=%g QOGE.", result.VSize, result.Fees.Base))
+	})
+	recoveryTestBtn.Importance = widget.SuccessImportance
+
+	recoveryBroadcastBtn.OnTapped = func() {
+		if !recoveryGate.Allows(recoverySignedHex) || recoveryContext.rawHex != recoverySignedHex || rpc == nil {
+			recoveryStatus.SetText("Recovery broadcast blocked — test the current signed transaction successfully first.")
+			recoveryGate.Reset(recoveryBroadcastBtn)
+			return
+		}
+		ctx := recoveryContext
+		message := fmt.Sprintf("FUND RECOVERY — not a normal transaction.\n\nFrom previously SPENT address: %s\nDestination: %s\nType: %s\nAmount: %s QOGE\n\nBroadcast now?", ctx.source, ctx.destination, ctx.destinationType, rpcclient.FormatQOGE(ctx.amountSats))
+		dialog.ShowConfirm("Confirm Fund Recovery Broadcast", message, func(ok bool) {
+			if !ok {
+				return
+			}
+			if !recoveryGate.Allows(recoverySignedHex) || ctx.rawHex != recoverySignedHex {
+				recoveryStatus.SetText("Recovery broadcast blocked — signed transaction changed.")
+				return
+			}
+			txid, historyErr, err := broadcastAndRecord(
+				func() (string, error) { return rpc.SendRawTransaction(context.Background(), ctx.rawHex) },
+				func(txid string) error {
+					return wlt.RecordOutgoingTransaction(wallet.OutgoingTransaction{TxID: txid, SourceAddress: ctx.source, Destination: ctx.destination, DestinationType: string(ctx.destinationType), AmountSats: ctx.amountSats, FeeSats: ctx.feeSats, BroadcastAt: time.Now().UTC()})
+				},
+			)
+			if err != nil {
+				recoveryStatus.SetText(fmt.Sprintf("sendrawtransaction RPC error: %v", err))
+				return
+			}
+			recoveryGate.Reset(recoveryBroadcastBtn)
+			if historyErr != nil {
+				recoveryStatus.SetText(fmt.Sprintf("Recovery broadcast successfully. Txid: %s. Local history warning: %v", txid, historyErr))
+			} else {
+				recoveryStatus.SetText(fmt.Sprintf("Recovery broadcast successfully. Txid: %s", txid))
+				renderTransactions()
+			}
+		}, w)
+	}
+
+	recoveryPreviewBtn := widget.NewButton("Preview Fund Recovery", func() {
+		recoveryGate.Reset(recoveryBroadcastBtn)
+		recoverySignedHex = ""
+		if wlt == nil || rpc == nil {
+			recoveryStatus.SetText("Open a wallet and connect to a node first.")
+			return
+		}
+		fromAddr := recoverySource.Selected
+		if fromAddr == "" {
+			recoveryStatus.SetText("Select a recoverable SPENT address.")
+			return
+		}
+		toAddr := strings.TrimSpace(recoveryDestination.Text)
+		destination, err := qogeaddress.DecodeMainnetDestination(toAddr)
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Invalid recovery destination: %v", err))
+			return
+		}
+		feeRate, err := txbuilder.ParseFeeRate(recoveryFeeRate.Text)
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Invalid recovery fee rate: %v", err))
+			return
+		}
+		scan, err := rpc.ScanTxOutSet(context.Background(), []string{"addr(" + fromAddr + ")"})
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Recovery UTXO scan failed: %v", err))
+			return
+		}
+		prepared, err := prepareSpendInputs(scan.Unspents)
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Cannot prepare recovery UTXOs: %v", err))
+			return
+		}
+		if err := validateRecoveryTransactionSize(len(prepared.WalletInputs), destination.ScriptPubKey); err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Recovery blocked: %d inputs found; safe maximum is %d. No transaction was signed. testmempoolaccept remains the final authoritative check.", len(prepared.WalletInputs), txbuilder.P2QPKSafeMaxInputs))
+			return
+		}
+		plan, err := txbuilder.PlanP2QPKWithdrawAll(prepared.TotalSats, feeRate, len(prepared.WalletInputs), destination.ScriptPubKey)
+		if err != nil {
+			recoveryStatus.SetText(fmt.Sprintf("Recovery fee planning failed: %v", err))
+			return
+		}
+		var lines strings.Builder
+		for i, utxo := range prepared.UTXOs {
+			fmt.Fprintf(&lines, "  %d. %s:%d — %s QOGE\n", i+1, utxo.TxID, utxo.Vout, rpcclient.FormatQOGE(utxo.Sats))
+		}
+		preview := fmt.Sprintf("FUND RECOVERY — THIS IS NOT A NORMAL TRANSACTION.\n\nPreviously SPENT source: %s\nDestination: %s\nType: %s\nInputs: %d\n%sTotal input: %s QOGE\nFee rate: %s QOGE/kB\nFinal vsize: %d vB\nFee: %s QOGE\nRecovered amount: %s QOGE\nChange: none\n\nSigning locks these exact outpoints before broadcast.", fromAddr, toAddr, destination.Type, len(prepared.UTXOs), lines.String(), rpcclient.FormatQOGE(prepared.TotalSats), rpcclient.FormatQOGE(feeRate), plan.VSize, rpcclient.FormatQOGE(plan.FeeSats), rpcclient.FormatQOGE(plan.SendSats))
+		content := widget.NewLabel(preview)
+		content.TextStyle = fyne.TextStyle{Monospace: true}
+		content.Wrapping = fyne.TextWrapBreak
+		scroll := container.NewVScroll(content)
+		scroll.SetMinSize(fyne.NewSize(760, 420))
+		dialog.ShowCustomConfirm("Confirm Fund Recovery", "Sign Recovery", "Cancel", scroll, func(ok bool) {
+			if !ok {
+				return
+			}
+			params := wallet.P2QPKSpendParams{NVersion: 2, Inputs: prepared.WalletInputs, SpentUTXOs: prepared.SpentUTXOs, Outputs: []wallet.SpendOutput{{Amount: plan.SendSats, Script: destination.ScriptPubKey}}, FromAddr: fromAddr}
+			pubKey, signatures, err := wlt.SignRecoverableP2QPKInputs(params)
+			if err != nil {
+				recoveryStatus.SetText(fmt.Sprintf("Recovery signing failed: %v", err))
+				return
+			}
+			witnesses := make([]txbuilder.P2QPKWitness, len(signatures))
+			for i, signature := range signatures {
+				witnesses[i] = txbuilder.P2QPKWitness{Sig: signature, PubKey: pubKey}
+			}
+			raw, err := txbuilder.SerializeBIP144(txbuilder.SignedP2QPKTx{NVersion: 2, Inputs: prepared.TxInputs, Outputs: []txbuilder.TxOutput{{Amount: plan.SendSats, Script: destination.ScriptPubKey}}, Witnesses: witnesses})
+			if err != nil {
+				recoveryStatus.SetText(fmt.Sprintf("Recovery serialization failed: %v", err))
+				return
+			}
+			recoverySignedHex = hex.EncodeToString(raw)
+			recoveryContext = signedBroadcastContext{rawHex: recoverySignedHex, source: fromAddr, destination: toAddr, destinationType: destination.Type, amountSats: plan.SendSats, feeSats: plan.FeeSats}
+			recoveryRawPreview.SetText(fmt.Sprintf("%d bytes / %d vB / %d inputs\n%s…\n…%s", len(raw), plan.VSize, len(prepared.TxInputs), recoverySignedHex[:64], recoverySignedHex[len(recoverySignedHex)-64:]))
+			recoveryStatus.SetText("Recovery signed and outpoints locked. Test Recovery Transaction before broadcast.")
+		}, w)
+	})
+	recoveryPreviewBtn.Importance = widget.HighImportance
+
+	recoveryWarning := widget.NewLabel("WARNING: FUND RECOVERY ONLY. This deliberately reuses key material from a SPENT address. It is not a normal FUNDED transaction. Recover the full balance to a safe destination.")
+	recoveryWarning.Wrapping = fyne.TextWrapWord
+	recoveryWarning.Importance = widget.DangerImportance
+	recoveryTab = container.NewTabItem("Recover from Spent", scrollPage(
+		pageTitle("Recover from Spent"), recoveryWarning,
+		container.NewCenter(recoveryRefreshBtn), widget.NewLabel("Recoverable SPENT address:"), recoverySource,
+		widget.NewLabel("Recovery destination:"), recoveryDestination,
+		widget.NewLabel("Fee rate (QOGE/kB):"), recoveryFeeRate,
+		container.NewHBox(recoveryPreviewBtn, recoveryTestBtn, recoveryBroadcastBtn),
+		widget.NewLabel("Signed recovery transaction:"), recoveryRawPreview,
+		widget.NewSeparator(), recoveryStatus,
+	))
 
 	// ── Send tab ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 	//
@@ -1349,6 +1630,9 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("prepare UTXOs: %w", err)
 		}
+		if _, err := txbuilder.ValidateP2QPKStandardSize(len(prepared.WalletInputs), destination.ScriptPubKey); err != nil {
+			return fmt.Errorf("cannot withdraw all: %w; no transaction was signed; testmempoolaccept remains the final authoritative check", err)
+		}
 		plan, err := txbuilder.PlanP2QPKWithdrawAll(prepared.TotalSats, feeRateSats, len(prepared.WalletInputs), destination.ScriptPubKey)
 		if err != nil {
 			return err
@@ -1411,6 +1695,12 @@ func main() {
 		prepared, err := prepareSpendInputs(scanResult.Unspents)
 		if err != nil {
 			sendStatusLabel.SetText(fmt.Sprintf("Cannot prepare UTXOs: %v", err))
+			return
+		}
+		if _, err := txbuilder.ValidateP2QPKStandardSize(len(prepared.WalletInputs), toDestination.ScriptPubKey); err != nil {
+			sendStatusLabel.SetText(fmt.Sprintf(
+				"This address has too many deposits to spend in one standard transaction. %d inputs found; safe maximum is %d. No transaction was signed. testmempoolaccept remains the final authoritative check.",
+				len(prepared.WalletInputs), txbuilder.P2QPKSafeMaxInputs))
 			return
 		}
 		amounts, err := prepareSendAmounts(prepared.TotalSats, len(prepared.WalletInputs), toDestination.ScriptPubKey, feeRateSats, amountEntry.Text, withdrawAllCheck.Checked)
@@ -1595,23 +1885,25 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs = newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
+	tabs = newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
 
 	walletNavBtn := widget.NewButtonWithIcon("Wallet", theme.AccountIcon(), nil)
 	addressesNavBtn = widget.NewButtonWithIcon("My Addresses", theme.ListIcon(), nil)
 	transactionsNavBtn = widget.NewButtonWithIcon("Transactions", theme.HistoryIcon(), nil)
+	recoveryNavBtn = widget.NewButtonWithIcon("Recover from Spent", theme.WarningIcon(), nil)
 	sendNavBtn = widget.NewButtonWithIcon("Send", theme.MailSendIcon(), nil)
 	networkNavBtn := widget.NewButtonWithIcon("Network", theme.SettingsIcon(), nil)
-	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, transactionsNavBtn, sendNavBtn, networkNavBtn}
+	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, transactionsNavBtn, recoveryNavBtn, sendNavBtn, networkNavBtn}
 	for _, button := range navButtons {
 		button.Alignment = widget.ButtonAlignLeading
 	}
 	addressesNavBtn.Disable()
 	transactionsNavBtn.Disable()
+	recoveryNavBtn.Disable()
 	sendNavBtn.Disable()
 
-	pages := []*container.TabItem{walletTab, addressesTab, transactionsTab, sendTab, networkTab}
-	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, transactionsTab.Content, sendTab.Content, networkTab.Content)
+	pages := []*container.TabItem{walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab}
+	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, transactionsTab.Content, recoveryTab.Content, sendTab.Content, networkTab.Content)
 	selectPage := func(selected *container.TabItem, selectedButton *widget.Button) {
 		tabs.Select(selected)
 		for i, page := range pages {
@@ -1630,6 +1922,7 @@ func main() {
 	walletNavBtn.OnTapped = func() { selectPage(walletTab, walletNavBtn) }
 	addressesNavBtn.OnTapped = func() { selectPage(addressesTab, addressesNavBtn) }
 	transactionsNavBtn.OnTapped = func() { selectPage(transactionsTab, transactionsNavBtn) }
+	recoveryNavBtn.OnTapped = func() { selectPage(recoveryTab, recoveryNavBtn) }
 	sendNavBtn.OnTapped = func() { selectPage(sendTab, sendNavBtn) }
 	networkNavBtn.OnTapped = func() { selectPage(networkTab, networkNavBtn) }
 	selectPage(walletTab, walletNavBtn)
@@ -1644,6 +1937,7 @@ func main() {
 		navItem(walletNavBtn),
 		navItem(addressesNavBtn),
 		navItem(transactionsNavBtn),
+		navItem(recoveryNavBtn),
 		navItem(sendNavBtn),
 		navItem(networkNavBtn),
 	)

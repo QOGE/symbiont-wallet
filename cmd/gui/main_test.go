@@ -112,6 +112,17 @@ func TestPrepareSpendInputsRejectsDuplicateOutpoint(t *testing.T) {
 	}
 }
 
+func TestValidateRecoveryTransactionSizeAppliesSafeInputCeiling(t *testing.T) {
+	destination := make([]byte, 34)
+	if err := validateRecoveryTransactionSize(txbuilder.P2QPKSafeMaxInputs, destination); err != nil {
+		t.Fatalf("safe recovery input count rejected: %v", err)
+	}
+	err := validateRecoveryTransactionSize(txbuilder.P2QPKSafeMaxInputs+1, destination)
+	if err == nil || !strings.Contains(err.Error(), "safe maximum is 22") {
+		t.Fatalf("23-input recovery error = %v", err)
+	}
+}
+
 func TestWithdrawAllAmountControlDisablesPopulatesAndRestoresManualValue(t *testing.T) {
 	entry := widget.NewEntry()
 	entry.SetText("12.345")
@@ -373,11 +384,12 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
+	recoveryTab := container.NewTabItem("Recover from Spent", widget.NewLabel("recovery"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
 
-	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
-	wantOrder := []string{"Wallet", "My Addresses", "Transactions", "Send", "Network"}
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
+	wantOrder := []string{"Wallet", "My Addresses", "Transactions", "Recover from Spent", "Send", "Network"}
 	if len(tabs.Items) != len(wantOrder) {
 		t.Fatalf("tab count = %d, want %d", len(tabs.Items), len(wantOrder))
 	}
@@ -389,7 +401,7 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	if walletTab.Disabled() || networkTab.Disabled() {
 		t.Fatal("Wallet and Network must be available before a wallet is loaded")
 	}
-	for _, item := range []*container.TabItem{addressesTab, transactionsTab, sendTab} {
+	for _, item := range []*container.TabItem{addressesTab, transactionsTab, recoveryTab, sendTab} {
 		if !item.Disabled() {
 			t.Fatalf("%s tab enabled before wallet load", item.Text)
 		}
@@ -407,9 +419,10 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
+	recoveryTab := container.NewTabItem("Recover from Spent", widget.NewLabel("recovery"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
-	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, sendTab, networkTab)
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
 	w := fynetest.NewWindow(tabs)
 	defer w.Close()
 	w.SetPadded(false)
@@ -419,7 +432,7 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	if tabs.Selected() != walletTab {
 		t.Fatalf("clicking disabled My Addresses selected %q, want Wallet", tabs.Selected().Text)
 	}
-	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(420, 10))
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(560, 10))
 	if tabs.Selected() != networkTab {
 		t.Fatalf("clicking enabled Network selected %q, want Network", tabs.Selected().Text)
 	}

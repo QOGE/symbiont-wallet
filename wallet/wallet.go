@@ -36,6 +36,7 @@ import (
 	"sync"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
+	"github.com/saogen/qoge-sphincs-wallet/internal/txbuilder"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	"github.com/saogen/qoge-sphincs-wallet/signer"
 	"golang.org/x/crypto/hkdf"
@@ -53,6 +54,8 @@ var ErrChangeAddressReserved = errors.New("wallet: change address is FRESH but r
 // ErrFromAddressNotFunded is returned when transaction signing is attempted
 // from any lifecycle state other than FUNDED.
 var ErrFromAddressNotFunded = errors.New("wallet: source address is not FUNDED")
+var ErrRecoveryNotAvailable = errors.New("wallet: source address is not an authorized SPENT recovery source")
+var ErrRecoveryOutpointsChanged = errors.New("wallet: recoverable UTXO set changed; Refresh before signing")
 
 // ErrChangeOutputMissing is returned when no output in the transaction pays
 // to the designated change address. A signed transaction must include the
@@ -288,6 +291,17 @@ func (w *Wallet) ObserveFunding(addr string, balanceSats int64, confirmations in
 	return true, nil
 }
 
+// ObserveRecoverableBalance marks mature UTXOs on a SPENT address as eligible
+// for the separate recovery signer without changing its lifecycle state.
+func (w *Wallet) ObserveRecoverableBalance(addr string, balanceSats int64, confirmations int, outpoints []keystore.RecoveryOutpoint) (bool, error) {
+	mature := balanceSats > 0 && confirmations >= FundingMinConfirmations
+	changed, err := w.index.ObserveRecoverableOutpoints(addr, outpoints, mature)
+	if err != nil {
+		return false, fmt.Errorf("wallet: ObserveRecoverableBalance: %w", err)
+	}
+	return changed, nil
+}
+
 // OnConfirmation transitions addr SPEND_PENDING → SPENT once its spending transaction has at least
 // one confirmation. Returns nil (no-op) if confirmations < 1.
 //
@@ -396,11 +410,15 @@ func (w *Wallet) ListPurgeEligibleAddresses(confirmationsFor func(addr string) i
 // the wallet layer has no node-RPC connection, so on-chain amounts are
 // not available here.
 type AddressInfo struct {
-	Index     uint64
-	Address   string
-	State     keystore.AddressState
-	Reserved  bool
-	SpendTxID string
+	Index                    uint64
+	Address                  string
+	State                    keystore.AddressState
+	Reserved                 bool
+	SpendTxID                string
+	HasRecoverableBalance    bool
+	RecoverySpendTxID        string
+	RecoverableOutpoints     []keystore.RecoveryOutpoint
+	RecoveryPendingOutpoints []keystore.RecoveryOutpoint
 }
 
 // ListAddresses returns a summary of every address in the wallet index,
@@ -424,11 +442,15 @@ func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 		}
 		for _, rec := range recs {
 			infos = append(infos, AddressInfo{
-				Index:     rec.Index,
-				Address:   rec.Address,
-				State:     rec.State,
-				Reserved:  rec.Reserved,
-				SpendTxID: rec.SpendTxID,
+				Index:                    rec.Index,
+				Address:                  rec.Address,
+				State:                    rec.State,
+				Reserved:                 rec.Reserved,
+				SpendTxID:                rec.SpendTxID,
+				HasRecoverableBalance:    rec.HasRecoverableBalance,
+				RecoverySpendTxID:        rec.RecoverySpendTxID,
+				RecoverableOutpoints:     append([]keystore.RecoveryOutpoint(nil), rec.RecoverableOutpoints...),
+				RecoveryPendingOutpoints: append([]keystore.RecoveryOutpoint(nil), rec.RecoveryPendingOutpoints...),
 			})
 		}
 	}
@@ -766,19 +788,34 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 	return pubKey, signatures[params.InputIndex], nil
 }
 
-// SignP2QPKInputs signs every input in one atomic wallet operation. All input,
+// SignP2QPKInputs signs a normal FUNDED source and deliberately retains its strict gate.
+func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) ([]byte, [][]byte, error) {
+	return w.signP2QPKInputs(params, false)
+}
+
+// SignRecoverableP2QPKInputs is the only signing entry point for a SPENT source.
+// It requires explicit, Refresh-authorized recoverable outpoints.
+func (w *Wallet) SignRecoverableP2QPKInputs(params P2QPKSpendParams) ([]byte, [][]byte, error) {
+	return w.signP2QPKInputs(params, true)
+}
+
+// signP2QPKInputs signs every input in one atomic wallet operation. All input,
 // spent-script, and change-routing validation completes before any signature is
 // produced. The signing mutex remains held through every SLH-DSA operation, and
 // FUNDED -> SPEND_PENDING, change reservation, and spend-txid persistence occur
 // only after every input has a signature.
-func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) (pubKey []byte, signatures [][]byte, err error) {
+func (w *Wallet) signP2QPKInputs(params P2QPKSpendParams, recovery bool) (pubKey []byte, signatures [][]byte, err error) {
 	w.signMu.Lock()
 	defer w.signMu.Unlock()
 	rec, err := w.index.GetRecord(params.FromAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: address not found: %w", err)
 	}
-	if rec.State != keystore.StateFunded {
+	if recovery {
+		if rec.State != keystore.StateSpent || !rec.HasRecoverableBalance || len(rec.RecoveryPendingOutpoints) > 0 {
+			return nil, nil, fmt.Errorf("wallet: SignRecoverableP2QPKInputs: %w", ErrRecoveryNotAvailable)
+		}
+	} else if rec.State != keystore.StateFunded {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: %w: address %s is %s",
 			ErrFromAddressNotFunded, params.FromAddr, rec.State)
 	}
@@ -793,6 +830,10 @@ func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) (pubKey []byte, signat
 	if int(params.InputIndex) >= len(params.Inputs) {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: InputIndex %d out of range (SpentUTXOs len %d)",
 			params.InputIndex, len(params.SpentUTXOs))
+	}
+	recoveryOutpoints := recoveryOutpointsFromParams(params)
+	if recovery && !sameWalletRecoveryOutpoints(rec.RecoverableOutpoints, recoveryOutpoints) {
+		return nil, nil, ErrRecoveryOutpointsChanged
 	}
 	fromScript, err := p2qpkScriptPubKey(params.FromAddr)
 	if err != nil {
@@ -825,6 +866,13 @@ func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) (pubKey []byte, signat
 		if output.Amount < 0 {
 			return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: output %d amount is negative", i)
 		}
+	}
+	projectedOutputs := make([]txbuilder.TxOutput, len(params.Outputs))
+	for i, output := range params.Outputs {
+		projectedOutputs[i] = txbuilder.TxOutput{Amount: output.Amount, Script: output.Script}
+	}
+	if _, err := txbuilder.ValidateP2QPKStandardTransaction(len(params.Inputs), projectedOutputs); err != nil {
+		return nil, nil, fmt.Errorf("wallet: SignP2QPKInputs: non-standard transaction size: %w", err)
 	}
 
 	// Change routing: two valid cases depending on whether ChangeAddr is set.
@@ -902,11 +950,52 @@ func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) (pubKey []byte, signat
 	}
 
 	spendTxID := p2qpkTxID(params)
-	if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID); err != nil {
+	if recovery {
+		if err := w.index.MarkRecoveryPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID, recoveryOutpoints); err != nil {
+			return nil, nil, fmt.Errorf("wallet: SignRecoverableP2QPKInputs: finalize recovery lock: %w", err)
+		}
+	} else if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID); err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: finalize lifecycle: %w", err)
 	}
 
 	return rec.PublicKey, signatures, nil
+}
+
+func recoveryOutpointsFromParams(params P2QPKSpendParams) []keystore.RecoveryOutpoint {
+	outpoints := make([]keystore.RecoveryOutpoint, len(params.Inputs))
+	for i, input := range params.Inputs {
+		txid := input.TxIDLE
+		for left, right := 0, len(txid)-1; left < right; left, right = left+1, right-1 {
+			txid[left], txid[right] = txid[right], txid[left]
+		}
+		amount := int64(0)
+		if i < len(params.SpentUTXOs) {
+			amount = params.SpentUTXOs[i].Amount
+		}
+		outpoints[i] = keystore.RecoveryOutpoint{TxID: hex.EncodeToString(txid[:]), Vout: input.Vout, AmountSats: amount}
+	}
+	return outpoints
+}
+
+func sameWalletRecoveryOutpoints(a, b []keystore.RecoveryOutpoint) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, outpoint := range a {
+		key := fmt.Sprintf("%s:%d:%d", outpoint.TxID, outpoint.Vout, outpoint.AmountSats)
+		if _, duplicate := set[key]; duplicate {
+			return false
+		}
+		set[key] = struct{}{}
+	}
+	for _, outpoint := range b {
+		key := fmt.Sprintf("%s:%d:%d", outpoint.TxID, outpoint.Vout, outpoint.AmountSats)
+		if _, ok := set[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // computeP2QPKSighash implements SIP-QOGE-PQC-02a §3, mirroring

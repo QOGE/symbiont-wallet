@@ -164,6 +164,40 @@ func P2QPKVirtualSize(inputCount int, outputs []TxOutput) (int64, error) {
 	return (weight + 3) / 4, nil
 }
 
+// P2QPKSafeMaxInputs leaves a practical margin below Qogecoin's 100,000-vbyte
+// standard transaction policy limit. A 23-input P2QPK transaction fits only
+// narrowly below that limit, so this wallet deliberately stops at 22 inputs.
+const P2QPKSafeMaxInputs = 22
+
+const maxStandardTxVSize = 100_000
+
+// ValidateP2QPKStandardSize rejects transaction shapes that are too close to,
+// or exceed, Qogecoin's standard transaction-size policy. It projects the
+// largest shape the Send flow can produce: the destination plus a 34-byte
+// wallet-owned P2QPK change output.
+func ValidateP2QPKStandardSize(inputCount int, destinationScript []byte) (int64, error) {
+	return ValidateP2QPKStandardTransaction(inputCount, []TxOutput{
+		{Script: destinationScript},
+		{Script: make([]byte, 34)},
+	})
+}
+
+// ValidateP2QPKStandardTransaction enforces the wallet's input safety margin
+// and Qogecoin's standard-size policy against the transaction's actual outputs.
+func ValidateP2QPKStandardTransaction(inputCount int, outputs []TxOutput) (int64, error) {
+	if inputCount > P2QPKSafeMaxInputs {
+		return 0, fmt.Errorf("txbuilder: %d inputs found; safe maximum is %d", inputCount, P2QPKSafeMaxInputs)
+	}
+	projectedVSize, err := P2QPKVirtualSize(inputCount, outputs)
+	if err != nil {
+		return 0, err
+	}
+	if projectedVSize > maxStandardTxVSize {
+		return 0, fmt.Errorf("txbuilder: projected transaction size %d vbytes exceeds standard limit %d", projectedVSize, maxStandardTxVSize)
+	}
+	return projectedVSize, nil
+}
+
 // FeeForRate calculates Core-compatible fees: ceil(rate_sats_per_kB*vsize/1000).
 func FeeForRate(rateSatsPerKB, vsize int64) (int64, error) {
 	if rateSatsPerKB <= 0 {

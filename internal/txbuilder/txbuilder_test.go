@@ -400,6 +400,48 @@ func TestP2QPKVirtualSizeMatchesSerializedWeight(t *testing.T) {
 	}
 }
 
+func TestValidateP2QPKStandardSizeEnforcesSafeInputCeilingAndProjectedVSize(t *testing.T) {
+	destination := make([]byte, 34)
+	got, err := ValidateP2QPKStandardSize(P2QPKSafeMaxInputs, destination)
+	if err != nil {
+		t.Fatalf("safe maximum rejected: %v", err)
+	}
+	want, err := P2QPKVirtualSize(P2QPKSafeMaxInputs, []TxOutput{{Script: destination}, {Script: make([]byte, 34)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want || got != 95_186 {
+		t.Fatalf("projected vsize = %d, want %d (known value 95186)", got, want)
+	}
+
+	if _, err := ValidateP2QPKStandardSize(P2QPKSafeMaxInputs+1, destination); err == nil {
+		t.Fatal("23-input transaction accepted despite safe ceiling")
+	}
+
+	oversizedDestination := make([]byte, 20_000)
+	if _, err := ValidateP2QPKStandardSize(P2QPKSafeMaxInputs, oversizedDestination); err == nil {
+		t.Fatal("transaction exceeding exact projected-vsize limit accepted")
+	}
+}
+
+func TestValidateP2QPKStandardTransactionUsesActualRecoveryOutputShape(t *testing.T) {
+	destination := make([]byte, 34)
+	got, err := ValidateP2QPKStandardTransaction(P2QPKSafeMaxInputs, []TxOutput{{Script: destination}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 95_143 {
+		t.Fatalf("22-input one-output recovery vsize = %d, want 95143", got)
+	}
+	conservative, err := ValidateP2QPKStandardSize(P2QPKSafeMaxInputs, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conservative != 95_186 || got >= conservative {
+		t.Fatalf("actual/conservative projections = %d/%d, want 95143/95186", got, conservative)
+	}
+}
+
 func TestFeeForRateMatchesCoreCeiling(t *testing.T) {
 	for _, tc := range []struct{ rate, vsize, want int64 }{
 		{10_000, 4_418, 44_180},

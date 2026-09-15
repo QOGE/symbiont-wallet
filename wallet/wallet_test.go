@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
+	"github.com/saogen/qoge-sphincs-wallet/internal/txbuilder"
 	"github.com/saogen/qoge-sphincs-wallet/keystore"
 	slhdsa "github.com/saogen/qoge-sphincs-wallet/signer"
 )
@@ -1944,5 +1946,302 @@ func TestSignP2QPKInputsRejectsDuplicatePrevoutWithDifferentSequence(t *testing.
 	changeRec, _ := w.index.GetRecord(changeAddr)
 	if fromRec.State != keystore.StateFunded || changeRec.Reserved {
 		t.Fatalf("duplicate-prevout rejection changed lifecycle: source=%s change reserved=%v", fromRec.State, changeRec.Reserved)
+	}
+}
+
+func prepareRecoverableSpent(t *testing.T, w *Wallet, inputCount int) (string, string, P2QPKSpendParams, []keystore.RecoveryOutpoint) {
+	t.Helper()
+	addresses := testFreshAddresses(t, w, 2)
+	fromAddr, changeAddr := addresses[0], addresses[1]
+	if err := testFundAddress(w, fromAddr); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, "", "original-spend"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.OnConfirmation(fromAddr, 1); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, fromAddr, changeAddr, inputCount)
+	outpoints := recoveryOutpointsFromParams(params)
+	var total int64
+	for _, outpoint := range outpoints {
+		total += outpoint.AmountSats
+	}
+	if changed, err := w.ObserveRecoverableBalance(fromAddr, total, FundingMinConfirmations, outpoints); err != nil || !changed {
+		t.Fatalf("ObserveRecoverableBalance = %v, %v", changed, err)
+	}
+	return fromAddr, changeAddr, params, outpoints
+}
+
+func TestObserveRecoverableBalanceUsesFundingDepthAndPreservesSpentState(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, _, _, outpoints := prepareRecoverableSpent(t, w, 2)
+	rec, _ := w.index.GetRecord(fromAddr)
+	if rec.State != keystore.StateSpent || !rec.HasRecoverableBalance || len(rec.RecoverableOutpoints) != 2 {
+		t.Fatalf("recoverable record = state %s available %v outpoints %d", rec.State, rec.HasRecoverableBalance, len(rec.RecoverableOutpoints))
+	}
+	if _, err := w.ObserveRecoverableBalance(fromAddr, 1, FundingMinConfirmations-1, outpoints); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = w.index.GetRecord(fromAddr)
+	if rec.HasRecoverableBalance || rec.State != keystore.StateSpent {
+		t.Fatalf("immature observation = state %s available %v", rec.State, rec.HasRecoverableBalance)
+	}
+}
+
+func TestNormalSignerStillRejectsRecoverableSpentSource(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, _, params, _ := prepareRecoverableSpent(t, w, 1)
+	if _, _, err := w.SignP2QPKInputs(params); !errors.Is(err, ErrFromAddressNotFunded) {
+		t.Fatalf("normal signer error = %v, want ErrFromAddressNotFunded", err)
+	}
+	rec, _ := w.index.GetRecord(fromAddr)
+	if rec.State != keystore.StateSpent || !rec.HasRecoverableBalance {
+		t.Fatal("normal signer mutated recovery authorization")
+	}
+}
+
+func TestDirectRecoverySigningRejectsTwentyThreeInputsBeforeMutation(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, changeAddr, params, outpoints := prepareRecoverableSpent(t, w, txbuilder.P2QPKSafeMaxInputs+1)
+	if _, _, err := w.SignRecoverableP2QPKInputs(params); err == nil || !strings.Contains(err.Error(), "safe maximum is 22") {
+		t.Fatalf("direct 23-input recovery error = %v", err)
+	}
+	rec, _ := w.index.GetRecord(fromAddr)
+	change, _ := w.index.GetRecord(changeAddr)
+	if rec.State != keystore.StateSpent || !rec.HasRecoverableBalance || len(rec.RecoveryPendingOutpoints) != 0 || !sameWalletRecoveryOutpoints(rec.RecoverableOutpoints, outpoints) {
+		t.Fatal("oversized recovery rejection mutated source authorization")
+	}
+	if change.Reserved {
+		t.Fatal("oversized recovery rejection reserved change")
+	}
+}
+
+func TestDirectNormalSigningRejectsTwentyThreeInputsBeforeMutation(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 2)
+	if err := testFundAddress(w, addresses[0]); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, addresses[0], addresses[1], txbuilder.P2QPKSafeMaxInputs+1)
+	if _, _, err := w.SignP2QPKInputs(params); err == nil || !strings.Contains(err.Error(), "safe maximum is 22") {
+		t.Fatalf("direct 23-input normal signing error = %v", err)
+	}
+	rec, _ := w.index.GetRecord(addresses[0])
+	change, _ := w.index.GetRecord(addresses[1])
+	if rec.State != keystore.StateFunded || change.Reserved {
+		t.Fatal("oversized normal rejection mutated lifecycle")
+	}
+}
+
+func TestDedicatedRecoverySignerLocksExactOutpointsAndReservesChange(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, changeAddr, params, outpoints := prepareRecoverableSpent(t, w, 2)
+	pubKey, signatures, err := w.SignRecoverableP2QPKInputs(params)
+	if err != nil || len(pubKey) != 32 || len(signatures) != 2 {
+		t.Fatalf("recovery sign = pubkey %d signatures %d error %v", len(pubKey), len(signatures), err)
+	}
+	for i, signature := range signatures {
+		inputParams := params
+		inputParams.InputIndex = uint32(i)
+		digest, err := computeP2QPKSighash(inputParams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		valid, err := slhdsa.Verify(digest, signature, pubKey)
+		if err != nil || !valid {
+			t.Fatalf("signature %d invalid: %v", i, err)
+		}
+	}
+	rec, _ := w.index.GetRecord(fromAddr)
+	change, _ := w.index.GetRecord(changeAddr)
+	if rec.State != keystore.StateSpent || rec.HasRecoverableBalance || !sameWalletRecoveryOutpoints(rec.RecoveryPendingOutpoints, outpoints) || rec.RecoverySpendTxID != p2qpkTxID(params) {
+		t.Fatalf("recovery final state = %+v", rec)
+	}
+	if !change.Reserved || change.State != keystore.StateFresh {
+		t.Fatal("recovery change was not atomically reserved")
+	}
+	if _, err := w.ObserveRecoverableBalance(fromAddr, 1, FundingMinConfirmations, outpoints); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = w.index.GetRecord(fromAddr)
+	if rec.HasRecoverableBalance {
+		t.Fatal("pending recovery outpoints were reauthorized")
+	}
+}
+
+func TestRecoveryCanRearmForLaterIndependentDeposit(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, _, params, oldOutpoints := prepareRecoverableSpent(t, w, 1)
+	params.ChangeAddr = ""
+	params.Outputs = params.Outputs[:1]
+	if _, _, err := w.SignRecoverableP2QPKInputs(params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.ObserveRecoverableBalance(fromAddr, 0, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	newOutpoints := []keystore.RecoveryOutpoint{{TxID: strings.Repeat("ef", 32), Vout: 3, AmountSats: oldOutpoints[0].AmountSats}}
+	changed, err := w.ObserveRecoverableBalance(fromAddr, newOutpoints[0].AmountSats, FundingMinConfirmations, newOutpoints)
+	if err != nil || !changed {
+		t.Fatalf("later deposit = changed %v error %v", changed, err)
+	}
+	rec, _ := w.index.GetRecord(fromAddr)
+	if !rec.HasRecoverableBalance || !sameWalletRecoveryOutpoints(rec.RecoverableOutpoints, newOutpoints) {
+		t.Fatal("later independent deposit did not create a new recovery cycle")
+	}
+}
+
+func TestRecoverySignerRejectsUnflaggedAndChangedOutpoints(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 2)
+	if err := testFundAddress(w, addresses[0]); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, addresses[0], addresses[1], 1)
+	if _, _, err := w.SignRecoverableP2QPKInputs(params); !errors.Is(err, ErrRecoveryNotAvailable) {
+		t.Fatalf("FUNDED recovery error = %v", err)
+	}
+	w2 := newTestWallet(t)
+	_, _, params, _ = prepareRecoverableSpent(t, w2, 1)
+	params.Inputs[0].Vout++
+	if _, _, err := w2.SignRecoverableP2QPKInputs(params); !errors.Is(err, ErrRecoveryOutpointsChanged) {
+		t.Fatalf("changed recovery error = %v, want ErrRecoveryOutpointsChanged", err)
+	}
+}
+
+func TestRecoverySignerRejectsEveryUnauthorizedLifecycleState(t *testing.T) {
+	states := []keystore.AddressState{keystore.StateFresh, keystore.StateFunded, keystore.StateSpendPending, keystore.StateSpent, keystore.StateRetired}
+	for _, state := range states {
+		t.Run(state.String(), func(t *testing.T) {
+			w := newTestWallet(t)
+			addresses := testFreshAddresses(t, w, 2)
+			fromAddr := addresses[0]
+			if state != keystore.StateFresh {
+				if err := testFundAddress(w, fromAddr); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == keystore.StateSpendPending || state == keystore.StateSpent || state == keystore.StateRetired {
+				if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, "", "original"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == keystore.StateSpent || state == keystore.StateRetired {
+				if err := w.OnConfirmation(fromAddr, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == keystore.StateRetired {
+				if err := w.PurgeSpentKey(fromAddr, KeyDestructionMinConfirmations); err != nil {
+					t.Fatal(err)
+				}
+			}
+			params := makeMultiInputSpendParams(t, fromAddr, addresses[1], 1)
+			if _, _, err := w.SignRecoverableP2QPKInputs(params); !errors.Is(err, ErrRecoveryNotAvailable) {
+				t.Fatalf("state %s error = %v, want ErrRecoveryNotAvailable", state, err)
+			}
+		})
+	}
+}
+
+func TestRetireBlockedWhileRecoveryAvailableOrPending(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		w := newTestWallet(t)
+		fromAddr, _, params, _ := prepareRecoverableSpent(t, w, 1)
+		if pending {
+			params.ChangeAddr = ""
+			params.Outputs = params.Outputs[:1]
+			if _, _, err := w.SignRecoverableP2QPKInputs(params); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.PurgeSpentKey(fromAddr, KeyDestructionMinConfirmations); err == nil {
+			t.Fatalf("retirement succeeded with recovery pending=%v", pending)
+		}
+		rec, _ := w.index.GetRecord(fromAddr)
+		if rec.State != keystore.StateSpent || len(rec.EncSeedBlob) == 0 {
+			t.Fatal("blocked retirement altered key or state")
+		}
+	}
+}
+
+func TestConcurrentRecoverySigningAllowsOnlyOneSuccess(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, _, params, _ := prepareRecoverableSpent(t, w, 1)
+	params.ChangeAddr = ""
+	params.Outputs = params.Outputs[:1]
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := w.SignRecoverableP2QPKInputs(params)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	var successes, rejections int
+	for err := range errs {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrRecoveryNotAvailable) {
+			rejections++
+		} else {
+			t.Fatalf("unexpected recovery race error: %v", err)
+		}
+	}
+	if successes != 1 || rejections != 1 {
+		t.Fatalf("successes/rejections = %d/%d, want 1/1", successes, rejections)
+	}
+	rec, _ := w.index.GetRecord(fromAddr)
+	if rec.HasRecoverableBalance || len(rec.RecoveryPendingOutpoints) != 1 {
+		t.Fatal("concurrent recovery did not leave one pending lock")
+	}
+}
+
+func TestRecoveryPendingLockSurvivesWalletRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "recovery-restart.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenSeed := append([]byte(nil), seed...)
+	w, err := CreateNew(dbPath, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromAddr, _, params, outpoints := prepareRecoverableSpent(t, w, 1)
+	params.ChangeAddr = ""
+	params.Outputs = params.Outputs[:1]
+	if _, _, err := w.SignRecoverableP2QPKInputs(params); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w, err = OpenExisting(dbPath, reopenSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.ObserveRecoverableBalance(fromAddr, outpoints[0].AmountSats, FundingMinConfirmations, outpoints); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.HasRecoverableBalance || len(rec.RecoveryPendingOutpoints) != 1 {
+		t.Fatalf("restart lost pending recovery lock: available=%v pending=%d", rec.HasRecoverableBalance, len(rec.RecoveryPendingOutpoints))
+	}
+	if _, _, err := w.SignRecoverableP2QPKInputs(params); !errors.Is(err, ErrRecoveryNotAvailable) {
+		t.Fatalf("repeat signing after restart error = %v, want ErrRecoveryNotAvailable", err)
 	}
 }

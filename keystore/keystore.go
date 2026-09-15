@@ -10,7 +10,8 @@
 //   - The index DB is persisted encrypted to disk (bbolt + AES-256-GCM).
 //
 // Security invariants (hard-coded, never configurable):
-//  1. Only FUNDED addresses may sign, and they may enter SPEND_PENDING once.
+//  1. Normal signing is FUNDED-only. SPENT signing requires the separate recovery
+//     API plus a persisted, exact recoverable-outpoint authorization.
 //  2. RETIRED is permanent. No address is ever un-retired.
 //  3. Change outputs route to an unreserved FRESH address, which is reserved
 //     atomically with the source's transition to SPEND_PENDING.
@@ -66,16 +67,18 @@ func (s AddressState) String() string {
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 var (
-	ErrAddressNotFresh     = errors.New("keystore: address is not an unreserved FRESH address")
-	ErrAddressNotFunded    = errors.New("keystore: address is not FUNDED")
-	ErrAddressNotPending   = errors.New("keystore: cannot mark spent — address is not SPEND_PENDING")
-	ErrAddressNotSpent     = errors.New("keystore: cannot retire — address is not SPENT")
-	ErrNoFreshAddress      = errors.New("keystore: no FRESH address available — call PreGenerate first")
-	ErrMasterSeedNotLoaded = errors.New("keystore: master seed not loaded — call Open first")
-	ErrInvalidSeedLength   = errors.New("keystore: invalid seed length (want 32 bytes)")
-	ErrIncompatibleDB      = errors.New("keystore: incompatible pre-five-state database; delete qoge_wallet.db and create a new wallet with a new seed")
-	ErrSeedMismatch        = errors.New("keystore: seed does not authenticate this wallet database")
-	ErrNoValidationRecord  = errors.New("keystore: wallet database has no encrypted key available for seed validation")
+	ErrAddressNotFresh      = errors.New("keystore: address is not an unreserved FRESH address")
+	ErrAddressNotFunded     = errors.New("keystore: address is not FUNDED")
+	ErrAddressNotPending    = errors.New("keystore: cannot mark spent — address is not SPEND_PENDING")
+	ErrAddressNotSpent      = errors.New("keystore: cannot retire — address is not SPENT")
+	ErrRecoveryNotAvailable = errors.New("keystore: address has no authorized recoverable balance")
+	ErrRecoveryInProgress   = errors.New("keystore: recovery signing is already pending")
+	ErrNoFreshAddress       = errors.New("keystore: no FRESH address available — call PreGenerate first")
+	ErrMasterSeedNotLoaded  = errors.New("keystore: master seed not loaded — call Open first")
+	ErrInvalidSeedLength    = errors.New("keystore: invalid seed length (want 32 bytes)")
+	ErrIncompatibleDB       = errors.New("keystore: incompatible pre-five-state database; delete qoge_wallet.db and create a new wallet with a new seed")
+	ErrSeedMismatch         = errors.New("keystore: seed does not authenticate this wallet database")
+	ErrNoValidationRecord   = errors.New("keystore: wallet database has no encrypted key available for seed validation")
 )
 
 // ─── AddressRecord ────────────────────────────────────────────────────────────
@@ -84,13 +87,24 @@ var (
 // The private key seed is stored encrypted in the DB until retirement,
 // then zeroed.
 type AddressRecord struct {
-	Index       uint64       `json:"index"`
-	Address     string       `json:"address"`    // Bech32 "qoge1..." address
-	PublicKey   []byte       `json:"public_key"` // 32-byte SLH-DSA pubkey
-	EncSeedBlob []byte       `json:"enc_seed"`   // AES-256-GCM encrypted seed (nil after retirement)
-	State       AddressState `json:"state"`
-	Reserved    bool         `json:"reserved,omitempty"`   // FRESH change output committed by a signed transaction
-	SpendTxID   string       `json:"spend_txid,omitempty"` // txid awaited while SPEND_PENDING
+	Index                    uint64             `json:"index"`
+	Address                  string             `json:"address"`    // Bech32 "qoge1..." address
+	PublicKey                []byte             `json:"public_key"` // 32-byte SLH-DSA pubkey
+	EncSeedBlob              []byte             `json:"enc_seed"`   // AES-256-GCM encrypted seed (nil after retirement)
+	State                    AddressState       `json:"state"`
+	HasRecoverableBalance    bool               `json:"has_recoverable_balance,omitempty"`
+	RecoverableOutpoints     []RecoveryOutpoint `json:"recoverable_outpoints,omitempty"`
+	RecoveryPendingOutpoints []RecoveryOutpoint `json:"recovery_pending_outpoints,omitempty"`
+	RecoverySpendTxID        string             `json:"recovery_spend_txid,omitempty"`
+	Reserved                 bool               `json:"reserved,omitempty"`   // FRESH change output committed by a signed transaction
+	SpendTxID                string             `json:"spend_txid,omitempty"` // txid awaited while SPEND_PENDING
+}
+
+// RecoveryOutpoint identifies and binds an observed recoverable UTXO.
+type RecoveryOutpoint struct {
+	TxID       string `json:"txid"`
+	Vout       uint32 `json:"vout"`
+	AmountSats int64  `json:"amount_sats"`
 }
 
 // ─── DB bucket names ─────────────────────────────────────────────────────────
@@ -396,6 +410,120 @@ func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr, spend
 	})
 }
 
+// ObserveRecoverableOutpoints reconciles current mature UTXOs of a SPENT
+// address with any recovery already committed by signing.
+func (ki *KeyIndex) ObserveRecoverableOutpoints(addr string, current []RecoveryOutpoint, mature bool) (bool, error) {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	becameAvailable := false
+	err := ki.db.Update(func(tx *bolt.Tx) error {
+		rec, key, err := findRecord(tx, addr)
+		if err != nil {
+			return err
+		}
+		if rec.State != StateSpent {
+			return ErrAddressNotSpent
+		}
+		currentSet := recoveryOutpointSet(current)
+		if len(rec.RecoveryPendingOutpoints) > 0 {
+			for _, pending := range rec.RecoveryPendingOutpoints {
+				if _, present := currentSet[recoveryOutpointKey(pending)]; present {
+					rec.HasRecoverableBalance = false
+					rec.RecoverableOutpoints = nil
+					return putRecord(tx, key, rec)
+				}
+			}
+			rec.RecoveryPendingOutpoints = nil
+			rec.RecoverySpendTxID = ""
+		}
+		wasAvailable := rec.HasRecoverableBalance
+		rec.HasRecoverableBalance = mature && len(current) > 0
+		if rec.HasRecoverableBalance {
+			rec.RecoverableOutpoints = append([]RecoveryOutpoint(nil), current...)
+		} else {
+			rec.RecoverableOutpoints = nil
+		}
+		becameAvailable = !wasAvailable && rec.HasRecoverableBalance
+		return putRecord(tx, key, rec)
+	})
+	return becameAvailable, err
+}
+
+// MarkRecoveryPendingAndReserveChange atomically consumes recovery authority,
+// locks its exact outpoints, persists the txid, and reserves optional change.
+func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, spendTxID string, outpoints []RecoveryOutpoint) error {
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	return ki.db.Update(func(tx *bolt.Tx) error {
+		from, fromKey, err := findRecord(tx, fromAddr)
+		if err != nil {
+			return err
+		}
+		if from.State != StateSpent {
+			return ErrAddressNotSpent
+		}
+		if len(from.RecoveryPendingOutpoints) > 0 {
+			return ErrRecoveryInProgress
+		}
+		if !from.HasRecoverableBalance || !sameRecoveryOutpoints(from.RecoverableOutpoints, outpoints) {
+			return ErrRecoveryNotAvailable
+		}
+		var change *AddressRecord
+		var changeKey []byte
+		if changeAddr != "" {
+			change, changeKey, err = findRecord(tx, changeAddr)
+			if err != nil {
+				return err
+			}
+			if change.State != StateFresh || change.Reserved {
+				return ErrAddressNotFresh
+			}
+		}
+		from.HasRecoverableBalance = false
+		from.RecoverableOutpoints = nil
+		from.RecoveryPendingOutpoints = append([]RecoveryOutpoint(nil), outpoints...)
+		from.RecoverySpendTxID = spendTxID
+		if err := putRecord(tx, fromKey, from); err != nil {
+			return err
+		}
+		if change != nil {
+			change.Reserved = true
+			if err := putRecord(tx, changeKey, change); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func recoveryOutpointKey(outpoint RecoveryOutpoint) string {
+	return fmt.Sprintf("%s:%d:%d", outpoint.TxID, outpoint.Vout, outpoint.AmountSats)
+}
+
+func recoveryOutpointSet(outpoints []RecoveryOutpoint) map[string]struct{} {
+	set := make(map[string]struct{}, len(outpoints))
+	for _, outpoint := range outpoints {
+		set[recoveryOutpointKey(outpoint)] = struct{}{}
+	}
+	return set
+}
+
+func sameRecoveryOutpoints(a, b []RecoveryOutpoint) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aSet, bSet := recoveryOutpointSet(a), recoveryOutpointSet(b)
+	if len(aSet) != len(a) || len(bSet) != len(b) {
+		return false
+	}
+	for key := range aSet {
+		if _, ok := bSet[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // MarkSpent transitions address addr from SPEND_PENDING → SPENT.
 func (ki *KeyIndex) MarkSpent(addr string) error {
 	return ki.transition(addr, StateSpendPending, StateSpent, false)
@@ -405,7 +533,24 @@ func (ki *KeyIndex) MarkSpent(addr string) error {
 // encrypted seed blob from the record. The private key material is gone.
 // This transition is irreversible. See SIP-QOGE-PQC-01 Section 5.4.
 func (ki *KeyIndex) Retire(addr string) error {
-	return ki.transition(addr, StateSpent, StateRetired, true)
+	ki.mu.Lock()
+	defer ki.mu.Unlock()
+	return ki.db.Update(func(tx *bolt.Tx) error {
+		rec, key, err := findRecord(tx, addr)
+		if err != nil {
+			return err
+		}
+		if rec.State != StateSpent {
+			return ErrAddressNotSpent
+		}
+		if rec.HasRecoverableBalance || len(rec.RecoveryPendingOutpoints) > 0 {
+			return ErrRecoveryInProgress
+		}
+		ZeroBytes(rec.EncSeedBlob)
+		rec.EncSeedBlob = nil
+		rec.State = StateRetired
+		return putRecord(tx, key, rec)
+	})
 }
 
 // transition is the internal state machine executor.
