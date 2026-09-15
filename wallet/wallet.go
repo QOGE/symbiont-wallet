@@ -832,7 +832,7 @@ func (w *Wallet) signP2QPKInputs(params P2QPKSpendParams, recovery bool) (pubKey
 			params.InputIndex, len(params.SpentUTXOs))
 	}
 	recoveryOutpoints := recoveryOutpointsFromParams(params)
-	if recovery && !sameWalletRecoveryOutpoints(rec.RecoverableOutpoints, recoveryOutpoints) {
+	if recovery && !walletRecoveryOutpointSubset(rec.RecoverableOutpoints, recoveryOutpoints) {
 		return nil, nil, ErrRecoveryOutpointsChanged
 	}
 	fromScript, err := p2qpkScriptPubKey(params.FromAddr)
@@ -977,25 +977,34 @@ func recoveryOutpointsFromParams(params P2QPKSpendParams) []keystore.RecoveryOut
 	return outpoints
 }
 
-func sameWalletRecoveryOutpoints(a, b []keystore.RecoveryOutpoint) bool {
-	if len(a) != len(b) {
+func walletRecoveryOutpointSubset(authorized, submitted []keystore.RecoveryOutpoint) bool {
+	if len(submitted) == 0 {
 		return false
 	}
-	set := make(map[string]struct{}, len(a))
-	for _, outpoint := range a {
+	set := make(map[string]struct{}, len(authorized))
+	for _, outpoint := range authorized {
 		key := fmt.Sprintf("%s:%d:%d", outpoint.TxID, outpoint.Vout, outpoint.AmountSats)
 		if _, duplicate := set[key]; duplicate {
 			return false
 		}
 		set[key] = struct{}{}
 	}
-	for _, outpoint := range b {
+	seen := make(map[string]struct{}, len(submitted))
+	for _, outpoint := range submitted {
 		key := fmt.Sprintf("%s:%d:%d", outpoint.TxID, outpoint.Vout, outpoint.AmountSats)
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
 		if _, ok := set[key]; !ok {
 			return false
 		}
 	}
 	return true
+}
+
+func sameWalletRecoveryOutpoints(a, b []keystore.RecoveryOutpoint) bool {
+	return len(a) == len(b) && walletRecoveryOutpointSubset(a, b)
 }
 
 // computeP2QPKSighash implements SIP-QOGE-PQC-02a §3, mirroring

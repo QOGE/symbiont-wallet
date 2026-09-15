@@ -449,8 +449,9 @@ func (ki *KeyIndex) ObserveRecoverableOutpoints(addr string, current []RecoveryO
 	return becameAvailable, err
 }
 
-// MarkRecoveryPendingAndReserveChange atomically consumes recovery authority,
-// locks its exact outpoints, persists the txid, and reserves optional change.
+// MarkRecoveryPendingAndReserveChange atomically consumes the selected recovery
+// authority, preserves any unselected recoverable remainder, locks the selected
+// outpoints, persists the txid, and reserves optional change.
 func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, spendTxID string, outpoints []RecoveryOutpoint) error {
 	ki.mu.Lock()
 	defer ki.mu.Unlock()
@@ -465,7 +466,7 @@ func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, sp
 		if len(from.RecoveryPendingOutpoints) > 0 {
 			return ErrRecoveryInProgress
 		}
-		if !from.HasRecoverableBalance || !sameRecoveryOutpoints(from.RecoverableOutpoints, outpoints) {
+		if !from.HasRecoverableBalance || !recoveryOutpointSubset(from.RecoverableOutpoints, outpoints) {
 			return ErrRecoveryNotAvailable
 		}
 		var change *AddressRecord
@@ -479,8 +480,15 @@ func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, sp
 				return ErrAddressNotFresh
 			}
 		}
-		from.HasRecoverableBalance = false
-		from.RecoverableOutpoints = nil
+		selected := recoveryOutpointSet(outpoints)
+		remaining := make([]RecoveryOutpoint, 0, len(from.RecoverableOutpoints)-len(outpoints))
+		for _, outpoint := range from.RecoverableOutpoints {
+			if _, consumed := selected[recoveryOutpointKey(outpoint)]; !consumed {
+				remaining = append(remaining, outpoint)
+			}
+		}
+		from.RecoverableOutpoints = remaining
+		from.HasRecoverableBalance = len(remaining) > 0
 		from.RecoveryPendingOutpoints = append([]RecoveryOutpoint(nil), outpoints...)
 		from.RecoverySpendTxID = spendTxID
 		if err := putRecord(tx, fromKey, from); err != nil {
@@ -508,16 +516,22 @@ func recoveryOutpointSet(outpoints []RecoveryOutpoint) map[string]struct{} {
 	return set
 }
 
-func sameRecoveryOutpoints(a, b []RecoveryOutpoint) bool {
-	if len(a) != len(b) {
+func recoveryOutpointSubset(authorized, submitted []RecoveryOutpoint) bool {
+	if len(submitted) == 0 {
 		return false
 	}
-	aSet, bSet := recoveryOutpointSet(a), recoveryOutpointSet(b)
-	if len(aSet) != len(a) || len(bSet) != len(b) {
+	aSet := recoveryOutpointSet(authorized)
+	if len(aSet) != len(authorized) {
 		return false
 	}
-	for key := range aSet {
-		if _, ok := bSet[key]; !ok {
+	seen := make(map[string]struct{}, len(submitted))
+	for _, outpoint := range submitted {
+		key := recoveryOutpointKey(outpoint)
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+		if _, ok := aSet[key]; !ok {
 			return false
 		}
 	}

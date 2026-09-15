@@ -372,6 +372,58 @@ func prepareSpendInputs(unspents []rpcclient.ScanUnspent) (preparedSpendInputs, 
 	return prepared, nil
 }
 
+func spendCandidates(unspents []rpcclient.ScanUnspent) ([]txbuilder.P2QPKCoin, error) {
+	prepared, err := prepareSpendInputs(unspents)
+	if err != nil {
+		return nil, err
+	}
+	coins := make([]txbuilder.P2QPKCoin, len(prepared.UTXOs))
+	for i, utxo := range prepared.UTXOs {
+		coins[i] = txbuilder.P2QPKCoin{ID: utxo.TxID, Vout: utxo.Vout, AmountSats: utxo.Sats}
+	}
+	return coins, nil
+}
+
+func selectedScanUnspents(unspents []rpcclient.ScanUnspent, selected []txbuilder.P2QPKCoin) []rpcclient.ScanUnspent {
+	wanted := make(map[string]struct{}, len(selected))
+	for _, coin := range selected {
+		wanted[fmt.Sprintf("%s:%d", coin.ID, coin.Vout)] = struct{}{}
+	}
+	result := make([]rpcclient.ScanUnspent, 0, len(selected))
+	for _, unspent := range unspents {
+		if _, ok := wanted[fmt.Sprintf("%s:%d", unspent.Txid, unspent.Vout)]; ok {
+			result = append(result, unspent)
+		}
+	}
+	return result
+}
+
+func selectSpendInputsForAmount(unspents []rpcclient.ScanUnspent, send, rate int64, script []byte) (preparedSpendInputs, txbuilder.P2QPKCoinSelection, txbuilder.P2QPKFeePlan, error) {
+	coins, err := spendCandidates(unspents)
+	if err != nil {
+		return preparedSpendInputs{}, txbuilder.P2QPKCoinSelection{}, txbuilder.P2QPKFeePlan{}, err
+	}
+	selection, plan, err := txbuilder.SelectP2QPKForAmount(coins, send, rate, script)
+	if err != nil {
+		return preparedSpendInputs{}, selection, plan, err
+	}
+	prepared, err := prepareSpendInputs(selectedScanUnspents(unspents, selection.Selected))
+	return prepared, selection, plan, err
+}
+
+func selectSpendInputsMaximum(unspents []rpcclient.ScanUnspent, rate int64, script []byte) (preparedSpendInputs, txbuilder.P2QPKCoinSelection, txbuilder.P2QPKWithdrawAllPlan, error) {
+	coins, err := spendCandidates(unspents)
+	if err != nil {
+		return preparedSpendInputs{}, txbuilder.P2QPKCoinSelection{}, txbuilder.P2QPKWithdrawAllPlan{}, err
+	}
+	selection, plan, err := txbuilder.SelectP2QPKMaximum(coins, rate, script)
+	if err != nil {
+		return preparedSpendInputs{}, selection, plan, err
+	}
+	prepared, err := prepareSpendInputs(selectedScanUnspents(unspents, selection.Selected))
+	return prepared, selection, plan, err
+}
+
 func validateRecoveryTransactionSize(inputCount int, destinationScript []byte) error {
 	_, err := txbuilder.ValidateP2QPKStandardSize(inputCount, destinationScript)
 	if err != nil {
@@ -1294,25 +1346,20 @@ func main() {
 			recoveryStatus.SetText(fmt.Sprintf("Recovery UTXO scan failed: %v", err))
 			return
 		}
-		prepared, err := prepareSpendInputs(scan.Unspents)
+		prepared, selection, plan, err := selectSpendInputsMaximum(scan.Unspents, feeRate, destination.ScriptPubKey)
 		if err != nil {
-			recoveryStatus.SetText(fmt.Sprintf("Cannot prepare recovery UTXOs: %v", err))
-			return
-		}
-		if err := validateRecoveryTransactionSize(len(prepared.WalletInputs), destination.ScriptPubKey); err != nil {
-			recoveryStatus.SetText(fmt.Sprintf("Recovery blocked: %d inputs found; safe maximum is %d. No transaction was signed. testmempoolaccept remains the final authoritative check.", len(prepared.WalletInputs), txbuilder.P2QPKSafeMaxInputs))
-			return
-		}
-		plan, err := txbuilder.PlanP2QPKWithdrawAll(prepared.TotalSats, feeRate, len(prepared.WalletInputs), destination.ScriptPubKey)
-		if err != nil {
-			recoveryStatus.SetText(fmt.Sprintf("Recovery fee planning failed: %v", err))
+			recoveryStatus.SetText(fmt.Sprintf("Recovery planning failed: %v", err))
 			return
 		}
 		var lines strings.Builder
 		for i, utxo := range prepared.UTXOs {
 			fmt.Fprintf(&lines, "  %d. %s:%d — %s QOGE\n", i+1, utxo.TxID, utxo.Vout, rpcclient.FormatQOGE(utxo.Sats))
 		}
-		preview := fmt.Sprintf("FUND RECOVERY — THIS IS NOT A NORMAL TRANSACTION.\n\nPreviously SPENT source: %s\nDestination: %s\nType: %s\nInputs: %d\n%sTotal input: %s QOGE\nFee rate: %s QOGE/kB\nFinal vsize: %d vB\nFee: %s QOGE\nRecovered amount: %s QOGE\nChange: none\n\nSigning locks these exact outpoints before broadcast.", fromAddr, toAddr, destination.Type, len(prepared.UTXOs), lines.String(), rpcclient.FormatQOGE(prepared.TotalSats), rpcclient.FormatQOGE(feeRate), plan.VSize, rpcclient.FormatQOGE(plan.FeeSats), rpcclient.FormatQOGE(plan.SendSats))
+		partialRecovery := ""
+		if len(selection.Unselected) > 0 {
+			partialRecovery = fmt.Sprintf("\nPARTIAL RECOVERY: %d of %d UTXOs selected; %d UTXOs (%s QOGE) remain. The address stays SPENT and the remainder needs Recover from Spent again after this pass confirms, possibly across multiple passes.\n", len(selection.Selected), len(selection.Selected)+len(selection.Unselected), len(selection.Unselected), rpcclient.FormatQOGE(selection.UnselectedTotal))
+		}
+		preview := fmt.Sprintf("FUND RECOVERY — THIS IS NOT A NORMAL TRANSACTION.\n\nPreviously SPENT source: %s\nDestination: %s\nType: %s\nInputs selected: %d of %d\nLeft behind: %d UTXO(s), %s QOGE\n%sSelected input total: %s QOGE\nFee rate: %s QOGE/kB\nFinal vsize: %d vB\nFee: %s QOGE\nRecovered amount: %s QOGE\nChange: none%s\n\nSigning locks these exact outpoints before broadcast.", fromAddr, toAddr, destination.Type, len(selection.Selected), len(selection.Selected)+len(selection.Unselected), len(selection.Unselected), rpcclient.FormatQOGE(selection.UnselectedTotal), lines.String(), rpcclient.FormatQOGE(prepared.TotalSats), rpcclient.FormatQOGE(feeRate), plan.VSize, rpcclient.FormatQOGE(plan.FeeSats), rpcclient.FormatQOGE(plan.SendSats), partialRecovery)
 		content := widget.NewLabel(preview)
 		content.TextStyle = fyne.TextStyle{Monospace: true}
 		content.Wrapping = fyne.TextWrapBreak
@@ -1345,7 +1392,7 @@ func main() {
 	})
 	recoveryPreviewBtn.Importance = widget.HighImportance
 
-	recoveryWarning := widget.NewLabel("WARNING: FUND RECOVERY ONLY. This deliberately reuses key material from a SPENT address. It is not a normal FUNDED transaction. Recover the full balance to a safe destination.")
+	recoveryWarning := widget.NewLabel("WARNING: FUND RECOVERY ONLY. This deliberately reuses key material from a SPENT address. It is not a normal FUNDED transaction. Recover the maximum available in each pass to a safe destination; large balances may require multiple passes.")
 	recoveryWarning.Wrapping = fyne.TextWrapWord
 	recoveryWarning.Importance = widget.DangerImportance
 	recoveryTab = container.NewTabItem("Recover from Spent", scrollPage(
@@ -1626,18 +1673,17 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("scantxoutset: %w", err)
 		}
-		prepared, err := prepareSpendInputs(scanResult.Unspents)
-		if err != nil {
-			return fmt.Errorf("prepare UTXOs: %w", err)
-		}
-		if _, err := txbuilder.ValidateP2QPKStandardSize(len(prepared.WalletInputs), destination.ScriptPubKey); err != nil {
-			return fmt.Errorf("cannot withdraw all: %w; no transaction was signed; testmempoolaccept remains the final authoritative check", err)
-		}
-		plan, err := txbuilder.PlanP2QPKWithdrawAll(prepared.TotalSats, feeRateSats, len(prepared.WalletInputs), destination.ScriptPubKey)
+		_, selection, plan, err := selectSpendInputsMaximum(scanResult.Unspents, feeRateSats, destination.ScriptPubKey)
 		if err != nil {
 			return err
 		}
 		withdrawAllControl.setCalculated(plan.SendSats)
+		if len(selection.Unselected) > 0 {
+			withdrawAllCheck.Text = "Withdraw maximum this pass & subtract fee"
+		} else {
+			withdrawAllCheck.Text = "Withdraw all & subtract fee from amount"
+		}
+		withdrawAllCheck.Refresh()
 		return nil
 	}
 	withdrawAllCheck.OnChanged = func(checked bool) {
@@ -1692,18 +1738,23 @@ func main() {
 			sendStatusLabel.SetText(fmt.Sprintf("scantxoutset error: %v", err))
 			return
 		}
-		prepared, err := prepareSpendInputs(scanResult.Unspents)
-		if err != nil {
-			sendStatusLabel.SetText(fmt.Sprintf("Cannot prepare UTXOs: %v", err))
-			return
+		var prepared preparedSpendInputs
+		var selection txbuilder.P2QPKCoinSelection
+		var amounts preparedSendAmounts
+		if withdrawAllCheck.Checked {
+			var plan txbuilder.P2QPKWithdrawAllPlan
+			prepared, selection, plan, err = selectSpendInputsMaximum(scanResult.Unspents, feeRateSats, toDestination.ScriptPubKey)
+			amounts = preparedSendAmounts{SendSats: plan.SendSats, FeeSats: plan.FeeSats, VSize: plan.VSize, WithdrawAll: true, DestinationScript: append([]byte(nil), toDestination.ScriptPubKey...)}
+		} else {
+			sendSats, parseErr := txbuilder.QOGEToSatoshis(amountEntry.Text)
+			if parseErr != nil || sendSats <= 0 {
+				err = fmt.Errorf("invalid amount: %v", parseErr)
+			} else {
+				var plan txbuilder.P2QPKFeePlan
+				prepared, selection, plan, err = selectSpendInputsForAmount(scanResult.Unspents, sendSats, feeRateSats, toDestination.ScriptPubKey)
+				amounts = preparedSendAmounts{SendSats: sendSats, FeeSats: plan.FeeSats, VSize: plan.VSize, ChangeSats: plan.ChangeSats, IncludeChange: plan.IncludeChange, DestinationScript: append([]byte(nil), toDestination.ScriptPubKey...)}
+			}
 		}
-		if _, err := txbuilder.ValidateP2QPKStandardSize(len(prepared.WalletInputs), toDestination.ScriptPubKey); err != nil {
-			sendStatusLabel.SetText(fmt.Sprintf(
-				"This address has too many deposits to spend in one standard transaction. %d inputs found; safe maximum is %d. No transaction was signed. testmempoolaccept remains the final authoritative check.",
-				len(prepared.WalletInputs), txbuilder.P2QPKSafeMaxInputs))
-			return
-		}
-		amounts, err := prepareSendAmounts(prepared.TotalSats, len(prepared.WalletInputs), toDestination.ScriptPubKey, feeRateSats, amountEntry.Text, withdrawAllCheck.Checked)
 		if err != nil {
 			sendStatusLabel.SetText(err.Error())
 			return
@@ -1747,14 +1798,31 @@ func main() {
 		withdrawAllLine := "Withdraw all: no\n"
 		amountLabel := "Amount:      "
 		if amounts.WithdrawAll {
-			withdrawAllLine = "Withdraw all: yes (fee subtracted from amount)\n"
+			if len(selection.Unselected) > 0 {
+				withdrawAllLine = "Withdraw maximum this pass: yes (fee subtracted from amount)\n"
+			} else {
+				withdrawAllLine = "Withdraw all: yes (fee subtracted from amount)\n"
+			}
 			amountLabel = "Final amount:"
+		}
+		partialWarning := ""
+		if len(selection.Unselected) > 0 {
+			partialWarning = fmt.Sprintf("\n⚠  PARTIAL SOURCE SPEND: %d of %d UTXOs selected; %d UTXOs (%s QOGE) remain.\n   After this confirms the address becomes SPENT; use Recover from Spent for the remainder, possibly in multiple passes.\n", len(selection.Selected), len(selection.Selected)+len(selection.Unselected), len(selection.Unselected), rpcclient.FormatQOGE(selection.UnselectedTotal))
+		}
+		if amounts.WithdrawAll {
+			if len(selection.Unselected) > 0 {
+				withdrawAllCheck.Text = "Withdraw maximum this pass & subtract fee"
+			} else {
+				withdrawAllCheck.Text = "Withdraw all & subtract fee from amount"
+			}
+			withdrawAllCheck.Refresh()
 		}
 		previewText := fmt.Sprintf(
 			"From:        %s\n\n"+
 				"To:          %s\n"+
 				"Type:        %s\n\n"+
-				"Inputs:      %d UTXO(s)\n"+
+				"Inputs:      %d selected of %d total\n"+
+				"Left behind: %d UTXO(s), %s QOGE\n"+
 				"Total input: %s QOGE  (%d sat)\n"+
 				"UTXOs:\n%s\n"+
 				"%s"+
@@ -1763,17 +1831,18 @@ func main() {
 				"Final vsize: %d vB\n"+
 				"Actual fee:  %s QOGE  (%d sat)\n"+
 				"%s\n"+
+				"%s"+
 				"⚠  This will irreversibly spend real mainnet QOGE.\n"+
 				"   Signing does NOT broadcast automatically.\n"+
 				"   After signing, run Test Transaction, then use the separate\n"+
 				"   Broadcast Transaction button.",
 			fromAddr, toAddr, toDestination.Type,
-			len(prepared.UTXOs), rpcclient.FormatQOGE(prepared.TotalSats), prepared.TotalSats, utxoLines.String(),
+			len(selection.Selected), len(selection.Selected)+len(selection.Unselected), len(selection.Unselected), rpcclient.FormatQOGE(selection.UnselectedTotal), rpcclient.FormatQOGE(prepared.TotalSats), prepared.TotalSats, utxoLines.String(),
 			withdrawAllLine, amountLabel,
 			rpcclient.FormatQOGE(sendSats), sendSats,
 			rpcclient.FormatQOGE(feeRateSats), amounts.VSize,
 			rpcclient.FormatQOGE(amounts.FeeSats), amounts.FeeSats,
-			changeLines,
+			changeLines, partialWarning,
 		)
 		content := widget.NewLabel(previewText)
 		content.TextStyle = fyne.TextStyle{Monospace: true}

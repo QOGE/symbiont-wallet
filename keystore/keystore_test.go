@@ -567,3 +567,19 @@ func TestFullLifecycleWithPoolRefill(t *testing.T) {
 		t.Errorf("RETIRED count = %d, want 1", retiredCount)
 	}
 }
+
+func TestRecoveryOutpointSubset(t *testing.T) {
+	a := []RecoveryOutpoint{{TxID: "a", Vout: 1, AmountSats: 10}, {TxID: "b", Vout: 2, AmountSats: 20}}
+	if !recoveryOutpointSubset(a, a[:1]) {
+		t.Fatal("valid subset rejected")
+	}
+	if recoveryOutpointSubset(a, nil) {
+		t.Fatal("empty subset accepted")
+	}
+	if recoveryOutpointSubset(a, []RecoveryOutpoint{a[0], a[0]}) {
+		t.Fatal("duplicate accepted")
+	}
+	if recoveryOutpointSubset(a, []RecoveryOutpoint{{TxID: "a", Vout: 1, AmountSats: 11}}) {
+		t.Fatal("mutated amount accepted")
+	}
+}

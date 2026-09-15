@@ -3,6 +3,8 @@ package txbuilder
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -608,5 +610,77 @@ func TestP2QPKScript_Prefix(t *testing.T) {
 	want := "522028b97dcffd5d692b1c910d606e85627d9e754e043a84aef6898d8bc2e3bb0f7c"
 	if got != want {
 		t.Errorf("script = %s\nwant   %s", got, want)
+	}
+}
+
+func TestSelectP2QPKForAmountStopsAtFirstFeeCoveredPrefix(t *testing.T) {
+	script := append([]byte{0x52, 0x20}, make([]byte, 32)...)
+	coins := []P2QPKCoin{{ID: "c", Vout: 0, AmountSats: 300_000}, {ID: "a", Vout: 1, AmountSats: 100_000}, {ID: "b", Vout: 0, AmountSats: 200_000}}
+	selection, plan, err := SelectP2QPKForAmount(coins, 150_000, 10_000, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Selected) != 2 || selection.Selected[0].ID != "a" || selection.Selected[1].ID != "b" {
+		t.Fatalf("selected = %+v", selection.Selected)
+	}
+	if plan.FeeSats <= 0 || selection.SelectedTotal != 300_000 || selection.UnselectedTotal != 300_000 {
+		t.Fatalf("selection=%+v plan=%+v", selection, plan)
+	}
+}
+
+func TestSelectP2QPKForAmountFallsBackToLargest22(t *testing.T) {
+	script := append([]byte{0x52, 0x20}, make([]byte, 32)...)
+	coins := make([]P2QPKCoin, 25)
+	for i := range coins {
+		coins[i] = P2QPKCoin{ID: fmt.Sprintf("%064x", i), AmountSats: 100_000}
+	}
+	coins[24].AmountSats = 10_000_000
+	selection, _, err := SelectP2QPKForAmount(coins, 5_000_000, 10_000, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Selected) != 22 {
+		t.Fatalf("selected %d", len(selection.Selected))
+	}
+	if selection.Selected[len(selection.Selected)-1].ID != fmt.Sprintf("%064x", 24) {
+		t.Fatalf("largest coin absent: %+v", selection.Selected)
+	}
+	if len(selection.Unselected) != 3 {
+		t.Fatalf("unselected %d", len(selection.Unselected))
+	}
+}
+
+func TestSelectP2QPKForAmountReportsInsufficientNotSize(t *testing.T) {
+	script := append([]byte{0x52, 0x20}, make([]byte, 32)...)
+	coins := make([]P2QPKCoin, 83)
+	for i := range coins {
+		coins[i] = P2QPKCoin{ID: fmt.Sprintf("%064x", i), AmountSats: 100_000}
+	}
+	_, _, err := SelectP2QPKForAmount(coins, 50_000_000, 10_000, script)
+	if err == nil || !strings.Contains(err.Error(), "insufficient funds") || strings.Contains(err.Error(), "safe maximum") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSelectP2QPKMaximumUsesSmallest22Deterministically(t *testing.T) {
+	script := append([]byte{0x52, 0x20}, make([]byte, 32)...)
+	coins := make([]P2QPKCoin, 25)
+	for i := range coins {
+		coins[i] = P2QPKCoin{ID: fmt.Sprintf("%064x", 24-i), Vout: uint32(i), AmountSats: int64((i + 1) * 100_000)}
+	}
+	selection, plan, err := SelectP2QPKMaximum(coins, 10_000, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Selected) != 22 || len(selection.Unselected) != 3 {
+		t.Fatalf("selection=%+v", selection)
+	}
+	for i := 1; i < len(selection.Selected); i++ {
+		if selection.Selected[i-1].AmountSats > selection.Selected[i].AmountSats {
+			t.Fatal("not ascending")
+		}
+	}
+	if selection.SelectedTotal != plan.SendSats+plan.FeeSats {
+		t.Fatalf("accounting: %d != %d + %d", selection.SelectedTotal, plan.SendSats, plan.FeeSats)
 	}
 }

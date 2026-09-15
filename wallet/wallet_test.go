@@ -2245,3 +2245,44 @@ func TestRecoveryPendingLockSurvivesWalletRestart(t *testing.T) {
 		t.Fatalf("repeat signing after restart error = %v, want ErrRecoveryNotAvailable", err)
 	}
 }
+
+func TestWalletRecoveryOutpointSubset(t *testing.T) {
+	a := []keystore.RecoveryOutpoint{{TxID: "a", Vout: 1, AmountSats: 10}, {TxID: "b", Vout: 2, AmountSats: 20}}
+	if !walletRecoveryOutpointSubset(a, a[:1]) {
+		t.Fatal("valid subset rejected")
+	}
+	if walletRecoveryOutpointSubset(a, nil) {
+		t.Fatal("empty subset accepted")
+	}
+	if walletRecoveryOutpointSubset(a, []keystore.RecoveryOutpoint{a[0], a[0]}) {
+		t.Fatal("duplicate subset accepted")
+	}
+	if walletRecoveryOutpointSubset(a, []keystore.RecoveryOutpoint{{TxID: "a", Vout: 1, AmountSats: 11}}) {
+		t.Fatal("mutated amount accepted")
+	}
+	if walletRecoveryOutpointSubset(a, []keystore.RecoveryOutpoint{{TxID: "foreign", Vout: 1, AmountSats: 10}}) {
+		t.Fatal("foreign outpoint accepted")
+	}
+}
+
+func TestRecoverableSignerPreservesUnselectedRemainderImmediately(t *testing.T) {
+	w := newTestWallet(t)
+	fromAddr, _, params, outpoints := prepareRecoverableSpent(t, w, 5)
+	params.Inputs = params.Inputs[:2]
+	params.SpentUTXOs = params.SpentUTXOs[:2]
+	params.Outputs = params.Outputs[:1]
+	params.ChangeAddr = ""
+	if _, signatures, err := w.SignRecoverableP2QPKInputs(params); err != nil || len(signatures) != 2 {
+		t.Fatalf("subset recovery sign: signatures=%d err=%v", len(signatures), err)
+	}
+	rec, err := w.index.GetRecord(fromAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.HasRecoverableBalance || !sameWalletRecoveryOutpoints(rec.RecoverableOutpoints, outpoints[2:]) {
+		t.Fatalf("unselected remainder not immediately recoverable: %+v", rec)
+	}
+	if !sameWalletRecoveryOutpoints(rec.RecoveryPendingOutpoints, outpoints[:2]) {
+		t.Fatalf("pending subset = %+v, want %+v", rec.RecoveryPendingOutpoints, outpoints[:2])
+	}
+}

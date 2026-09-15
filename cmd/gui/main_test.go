@@ -672,3 +672,21 @@ func TestDecodeCreateSeedHexRequiresBackupAcknowledgment(t *testing.T) {
 		t.Fatalf("acknowledged create seed length = %d, want 32", len(seed))
 	}
 }
+
+func TestSelectSpendInputsMaximumUsesOnlySmallest22(t *testing.T) {
+	unspents := make([]rpcclient.ScanUnspent, 25)
+	for i := range unspents {
+		unspents[i] = rpcclient.ScanUnspent{Txid: fmt.Sprintf("%064x", i+1), Vout: uint32(i), ScriptPubKey: "5220" + strings.Repeat("11", 32), Amount: float64(i+1) / 10}
+	}
+	script := append([]byte{0x52, 0x20}, make([]byte, 32)...)
+	prepared, selection, plan, err := selectSpendInputsMaximum(unspents, 10_000, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.UTXOs) != 22 || len(selection.Unselected) != 3 {
+		t.Fatalf("selected=%d unselected=%d", len(prepared.UTXOs), len(selection.Unselected))
+	}
+	if prepared.TotalSats != selection.SelectedTotal || selection.SelectedTotal != plan.SendSats+plan.FeeSats {
+		t.Fatalf("accounting mismatch: prepared=%d selection=%d plan=%+v", prepared.TotalSats, selection.SelectedTotal, plan)
+	}
+}

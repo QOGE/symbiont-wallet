@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,143 @@ type P2QPKWithdrawAllPlan struct {
 	SendSats int64
 	FeeSats  int64
 	VSize    int64
+}
+
+// P2QPKCoin is an immutable candidate for deterministic selection.
+type P2QPKCoin struct {
+	ID         string
+	Vout       uint32
+	AmountSats int64
+}
+
+type P2QPKCoinSelection struct {
+	Selected        []P2QPKCoin
+	Unselected      []P2QPKCoin
+	SelectedTotal   int64
+	UnselectedTotal int64
+}
+
+func orderedP2QPKCoins(coins []P2QPKCoin) ([]P2QPKCoin, error) {
+	if len(coins) == 0 {
+		return nil, fmt.Errorf("txbuilder: no UTXOs")
+	}
+	ordered := append([]P2QPKCoin(nil), coins...)
+	seen := make(map[string]struct{}, len(ordered))
+	for _, coin := range ordered {
+		if coin.AmountSats <= 0 {
+			return nil, fmt.Errorf("txbuilder: UTXO %s:%d amount must be positive", coin.ID, coin.Vout)
+		}
+		key := fmt.Sprintf("%s:%d", coin.ID, coin.Vout)
+		if _, duplicate := seen[key]; duplicate {
+			return nil, fmt.Errorf("txbuilder: duplicate UTXO %s", key)
+		}
+		seen[key] = struct{}{}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].AmountSats != ordered[j].AmountSats {
+			return ordered[i].AmountSats < ordered[j].AmountSats
+		}
+		if ordered[i].ID != ordered[j].ID {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].Vout < ordered[j].Vout
+	})
+	return ordered, nil
+}
+
+func buildP2QPKCoinSelection(all, selected []P2QPKCoin) (P2QPKCoinSelection, error) {
+	chosen := make(map[string]struct{}, len(selected))
+	result := P2QPKCoinSelection{Selected: append([]P2QPKCoin(nil), selected...)}
+	for _, coin := range selected {
+		chosen[fmt.Sprintf("%s:%d", coin.ID, coin.Vout)] = struct{}{}
+		if result.SelectedTotal > math.MaxInt64-coin.AmountSats {
+			return P2QPKCoinSelection{}, fmt.Errorf("txbuilder: selected total overflows")
+		}
+		result.SelectedTotal += coin.AmountSats
+	}
+	for _, coin := range all {
+		if _, ok := chosen[fmt.Sprintf("%s:%d", coin.ID, coin.Vout)]; ok {
+			continue
+		}
+		result.Unselected = append(result.Unselected, coin)
+		if result.UnselectedTotal > math.MaxInt64-coin.AmountSats {
+			return P2QPKCoinSelection{}, fmt.Errorf("txbuilder: unselected total overflows")
+		}
+		result.UnselectedTotal += coin.AmountSats
+	}
+	return result, nil
+}
+
+// SelectP2QPKForAmount tries the ascending-value prefix, then the 22 largest.
+func SelectP2QPKForAmount(coins []P2QPKCoin, send, rate int64, script []byte) (P2QPKCoinSelection, P2QPKFeePlan, error) {
+	if send <= 0 {
+		return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: send amount must be positive")
+	}
+	if rate <= 0 {
+		return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: fee rate must be positive")
+	}
+	if len(script) == 0 {
+		return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: destination script is empty")
+	}
+	ordered, err := orderedP2QPKCoins(coins)
+	if err != nil {
+		return P2QPKCoinSelection{}, P2QPKFeePlan{}, err
+	}
+	limit := len(ordered)
+	if limit > P2QPKSafeMaxInputs {
+		limit = P2QPKSafeMaxInputs
+	}
+	var total int64
+	for count := 1; count <= limit; count++ {
+		coin := ordered[count-1]
+		if total > math.MaxInt64-coin.AmountSats {
+			return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: selected total overflows")
+		}
+		total += coin.AmountSats
+		if plan, planErr := PlanP2QPKFee(total, send, rate, count, script); planErr == nil {
+			selection, err := buildP2QPKCoinSelection(ordered, ordered[:count])
+			return selection, plan, err
+		}
+	}
+	if len(ordered) > P2QPKSafeMaxInputs {
+		largest := ordered[len(ordered)-P2QPKSafeMaxInputs:]
+		total = 0
+		for _, coin := range largest {
+			if total > math.MaxInt64-coin.AmountSats {
+				return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: selected total overflows")
+			}
+			total += coin.AmountSats
+		}
+		if plan, planErr := PlanP2QPKFee(total, send, rate, len(largest), script); planErr == nil {
+			selection, err := buildP2QPKCoinSelection(ordered, largest)
+			return selection, plan, err
+		}
+	}
+	return P2QPKCoinSelection{}, P2QPKFeePlan{}, fmt.Errorf("txbuilder: insufficient funds: no selection of at most %d inputs covers amount plus fee", P2QPKSafeMaxInputs)
+}
+
+// SelectP2QPKMaximum selects min(22,n) smallest coins for a no-change pass.
+func SelectP2QPKMaximum(coins []P2QPKCoin, rate int64, script []byte) (P2QPKCoinSelection, P2QPKWithdrawAllPlan, error) {
+	if rate <= 0 {
+		return P2QPKCoinSelection{}, P2QPKWithdrawAllPlan{}, fmt.Errorf("txbuilder: fee rate must be positive")
+	}
+	if len(script) == 0 {
+		return P2QPKCoinSelection{}, P2QPKWithdrawAllPlan{}, fmt.Errorf("txbuilder: destination script is empty")
+	}
+	ordered, err := orderedP2QPKCoins(coins)
+	if err != nil {
+		return P2QPKCoinSelection{}, P2QPKWithdrawAllPlan{}, err
+	}
+	limit := len(ordered)
+	if limit > P2QPKSafeMaxInputs {
+		limit = P2QPKSafeMaxInputs
+	}
+	selection, err := buildP2QPKCoinSelection(ordered, ordered[:limit])
+	if err != nil {
+		return P2QPKCoinSelection{}, P2QPKWithdrawAllPlan{}, err
+	}
+	plan, err := PlanP2QPKWithdrawAll(selection.SelectedTotal, rate, limit, script)
+	return selection, plan, err
 }
 
 // P2QPKWitness is the witness stack for one P2QPK input.
