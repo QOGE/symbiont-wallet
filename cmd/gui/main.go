@@ -830,11 +830,15 @@ func main() {
 			indexText.Alignment = fyne.TextAlignTrailing
 			index := container.NewGridWrap(fyne.NewSize(addressIndexColWidth, addressListRowHeight), indexText)
 
-			addressText := canvas.NewText(addr, qgDisplayMuted)
+			rowInk := qgDisplayMuted
+			if info.State == keystore.StateFunded {
+				rowInk = QGDisplayFunded
+			}
+			addressText := canvas.NewText(addr, rowInk)
 			addressText.TextSize = addressListTextSize
 			addressText.FontSource = fontSpaceMonoRegular
 
-			balanceValue := canvas.NewText(balanceText, qgDisplayMuted)
+			balanceValue := canvas.NewText(balanceText, rowInk)
 			balanceValue.TextSize = addressListTextSize
 			balanceValue.FontSource = fontSpaceMonoRegular
 
@@ -848,6 +852,10 @@ func main() {
 			row := container.New(layout.NewCustomPaddedHBoxLayout(addressListSpacing),
 				index, chip, addressText, layout.NewSpacer(), balanceValue, copyBtn)
 			row = container.New(layout.NewCustomPaddedLayout(0, 0, 0, addressListRightInset), row)
+			if info.State == keystore.StateFunded {
+				rowBg := canvas.NewRectangle(adaptiveTint(QGDisplayFunded, 0x28, 0x18))
+				row = container.NewStack(rowBg, row)
+			}
 			hairline := canvas.NewRectangle(qgDisplayBorder)
 			hairline.SetMinSize(fyne.NewSize(1, 1))
 			addrListBox.Add(container.New(layout.NewCustomPaddedVBoxLayout(0), row, hairline))
