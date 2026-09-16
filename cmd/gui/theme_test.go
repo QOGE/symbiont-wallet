@@ -10,6 +10,30 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
+func TestSpentChipUsesDangerRedNotTransparent(t *testing.T) {
+	wantDark := qogeDarkPalette.danger
+	wantLight := qogeLightPalette.danger
+	if qogeDarkPalette.spent != wantDark || qogeLightPalette.spent != wantLight {
+		t.Fatalf("palette spent = dark %#v light %#v, want danger", qogeDarkPalette.spent, qogeLightPalette.spent)
+	}
+	qogeLightActive.Store(false)
+	r, g, b, a := QGDisplaySpent.RGBA()
+	dr, dg, db, da := wantDark.RGBA()
+	if r != dr || g != dg || b != db || a != da {
+		t.Fatalf("dark QGDisplaySpent RGBA = %d,%d,%d,%d want %d,%d,%d,%d", r, g, b, a, dr, dg, db, da)
+	}
+	qogeLightActive.Store(true)
+	t.Cleanup(func() { qogeLightActive.Store(false) })
+	r, g, b, a = QGDisplaySpent.RGBA()
+	lr, lg, lb, la := wantLight.RGBA()
+	if r != lr || g != lg || b != lb || a != la {
+		t.Fatalf("light QGDisplaySpent RGBA = %d,%d,%d,%d want %d,%d,%d,%d", r, g, b, a, lr, lg, lb, la)
+	}
+	if a == 0 {
+		t.Fatal("SPENT chip color must not be transparent")
+	}
+}
+
 func TestQogeThemeTypeScaleIsReadable(t *testing.T) {
 	th := NewQogeTheme()
 	if got := th.Size(theme.SizeNameText); got != 13 {
