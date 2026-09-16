@@ -1160,7 +1160,8 @@ func main() {
 	// ── Transactions tab ───────────────────────────────────────────────────
 
 	historyList := container.NewVBox()
-	historyScroll := container.NewVScroll(historyList)
+	historyThemed := container.NewThemeOverride(historyList, qogeHistoryCardTheme{Theme: NewQogeTheme()})
+	historyScroll := container.NewVScroll(historyThemed)
 	historyScroll.SetMinSize(fyne.NewSize(0, 120))
 	historyStatus := widget.NewLabel("Transaction history is stored locally in this wallet.")
 	historyStatus.Wrapping = fyne.TextWrapWord
@@ -1203,18 +1204,25 @@ func main() {
 			}
 			var details string
 			directionIcon := theme.MoveDownIcon()
+			cardFill := QGDisplayFunded
 			if record.Direction == wallet.TransactionOutgoing {
 				directionIcon = theme.MoveUpIcon()
+				cardFill = QGDisplayMagenta
 				details = fmt.Sprintf("OUTGOING    Amount: %s QOGE    Fee: %s QOGE\nFrom: %s\nTo: %s (%s)\nBroadcast by this wallet: %s", rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.SourceAddress, record.Destination, record.DestinationType, record.RecordedAt.Local().Format(time.RFC3339))
 			} else {
 				details = fmt.Sprintf("INCOMING    Amount: %s QOGE\nReceived at: %s\nFirst recorded as FUNDED by Refresh: %s", rpcclient.FormatQOGE(record.AmountSats), record.Destination, record.RecordedAt.Local().Format(time.RFC3339))
 			}
-			historyList.Add(widget.NewCard("", "", container.NewVBox(
-				container.NewBorder(nil, nil, widget.NewIcon(directionIcon), nil, widget.NewLabel(details)),
-				container.NewBorder(nil, nil, nil, copyTxID, txid),
+			cardBg := canvas.NewRectangle(adaptiveTint(cardFill, 0x28, 0x18))
+			cardBg.CornerRadius = 1
+			historyList.Add(container.NewStack(cardBg, container.New(layout.NewCustomPaddedLayout(4, 4, 6, 6),
+				container.New(layout.NewCustomPaddedVBoxLayout(0),
+					container.NewBorder(nil, nil, widget.NewIcon(directionIcon), nil, widget.NewLabel(details)),
+					container.NewBorder(nil, nil, nil, copyTxID, txid),
+				),
 			)))
 		}
 		historyList.Refresh()
+		historyThemed.Refresh()
 		historyStatus.SetText(fmt.Sprintf("%d recorded transaction(s), %d hidden, newest first. Confirmation status is not tracked here.", len(records), hidden))
 	}
 	refreshHistoryBtn := widget.NewButtonWithIcon("Refresh history", theme.ViewRefreshIcon(), renderTransactions)

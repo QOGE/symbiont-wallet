@@ -74,6 +74,7 @@ var (
 	qgDisplayCream      = adaptive(qogeDarkPalette.cream, qogeLightPalette.cream)
 	QGDisplayFresh      = adaptive(qogeDarkPalette.fresh, qogeLightPalette.fresh)
 	QGDisplayFunded     = adaptive(qogeDarkPalette.funded, qogeLightPalette.funded)
+	QGDisplayMagenta    = adaptive(qogeDarkPalette.magenta, qogeLightPalette.magenta)
 	QGDisplayPending    = adaptive(qogeDarkPalette.pending, qogeLightPalette.pending)
 	QGDisplaySpent      = adaptive(qogeDarkPalette.spent, qogeLightPalette.spent)
 	QGDisplayRetired    = adaptive(qogeDarkPalette.retired, qogeLightPalette.retired)
@@ -391,6 +392,22 @@ func (t qogeAddressListTheme) Font(_ fyne.TextStyle) fyne.Resource {
 	return fontSpaceMonoRegular
 }
 
+// qogeHistoryCardTheme removes the empty band between transaction details and
+// the txid link by shrinking stacked Label/Hyperlink inner padding.
+type qogeHistoryCardTheme struct {
+	fyne.Theme
+}
+
+func (t qogeHistoryCardTheme) Size(name fyne.ThemeSizeName) float32 {
+	switch name {
+	case theme.SizeNamePadding, theme.SizeNameInnerPadding:
+		return 2
+	case theme.SizeNameCardRadius:
+		return 1
+	}
+	return t.Theme.Size(name)
+}
+
 func (t qogeSidebarTheme) Size(name fyne.ThemeSizeName) float32 {
 	if name == theme.SizeNameButtonRadius {
 		return 6
@@ -514,3 +531,5 @@ func newSummaryCard(title, caption string, accent color.Color) (*summaryValue, f
 	card := container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), inner))
 	return &summaryValue{text: value}, card
 }
+
+
