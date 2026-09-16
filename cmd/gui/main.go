@@ -1202,12 +1202,17 @@ func main() {
 				txid = label
 			}
 			var details string
+			directionIcon := theme.MoveDownIcon()
 			if record.Direction == wallet.TransactionOutgoing {
-				details = fmt.Sprintf("OUTGOING\nAmount: %s QOGE\nFee: %s QOGE\nFrom: %s\nTo: %s (%s)\nBroadcast by this wallet: %s", rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.SourceAddress, record.Destination, record.DestinationType, record.RecordedAt.Local().Format(time.RFC3339))
+				directionIcon = theme.MoveUpIcon()
+				details = fmt.Sprintf("OUTGOING    Amount: %s QOGE    Fee: %s QOGE\nFrom: %s\nTo: %s (%s)\nBroadcast by this wallet: %s", rpcclient.FormatQOGE(record.AmountSats), rpcclient.FormatQOGE(record.FeeSats), record.SourceAddress, record.Destination, record.DestinationType, record.RecordedAt.Local().Format(time.RFC3339))
 			} else {
-				details = fmt.Sprintf("INCOMING\nAmount: %s QOGE\nReceived at: %s\nFirst recorded as FUNDED by Refresh: %s", rpcclient.FormatQOGE(record.AmountSats), record.Destination, record.RecordedAt.Local().Format(time.RFC3339))
+				details = fmt.Sprintf("INCOMING    Amount: %s QOGE\nReceived at: %s\nFirst recorded as FUNDED by Refresh: %s", rpcclient.FormatQOGE(record.AmountSats), record.Destination, record.RecordedAt.Local().Format(time.RFC3339))
 			}
-			historyList.Add(widget.NewCard("", "", container.NewVBox(widget.NewLabel(details), container.NewBorder(nil, nil, nil, copyTxID, txid))))
+			historyList.Add(widget.NewCard("", "", container.NewVBox(
+				container.NewBorder(nil, nil, widget.NewIcon(directionIcon), nil, widget.NewLabel(details)),
+				container.NewBorder(nil, nil, nil, copyTxID, txid),
+			)))
 		}
 		historyList.Refresh()
 		historyStatus.SetText(fmt.Sprintf("%d recorded transaction(s), %d hidden, newest first. Confirmation status is not tracked here.", len(records), hidden))
