@@ -144,7 +144,7 @@ func Open(dbPath string, seed []byte) (*KeyIndex, error) {
 	// Initialise buckets and reject old records rather than interpreting their
 	// numeric state values under the new five-state lifecycle.
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, bkt := range [][]byte{bucketAddresses, bucketMeta, bucketTransactions} {
+		for _, bkt := range [][]byte{bucketAddresses, bucketMeta, bucketTransactions, bucketPendingBroadcasts} {
 			if _, err := tx.CreateBucketIfNotExists(bkt); err != nil {
 				return err
 			}
@@ -373,7 +373,7 @@ func (ki *KeyIndex) MarkFunded(addr string) error {
 // MarkSpendPendingAndReserveChange atomically transitions the signing source
 // FUNDED → SPEND_PENDING, persists the transaction it is awaiting, and
 // optionally reserves a FRESH change address.
-func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr, spendTxID string) error {
+func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr, spendTxID string, pending ...PendingBroadcast) error {
 	ki.mu.Lock()
 	defer ki.mu.Unlock()
 	return ki.db.Update(func(tx *bolt.Tx) error {
@@ -394,6 +394,9 @@ func (ki *KeyIndex) MarkSpendPendingAndReserveChange(fromAddr, changeAddr, spend
 			if change.State != StateFresh || change.Reserved {
 				return ErrAddressNotFresh
 			}
+		}
+		if err := putPendingForTransition(tx, spendTxID, fromAddr, "spend", pending); err != nil {
+			return err
 		}
 		from.State = StateSpendPending
 		from.SpendTxID = spendTxID
@@ -452,7 +455,7 @@ func (ki *KeyIndex) ObserveRecoverableOutpoints(addr string, current []RecoveryO
 // MarkRecoveryPendingAndReserveChange atomically consumes the selected recovery
 // authority, preserves any unselected recoverable remainder, locks the selected
 // outpoints, persists the txid, and reserves optional change.
-func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, spendTxID string, outpoints []RecoveryOutpoint) error {
+func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, spendTxID string, outpoints []RecoveryOutpoint, pending ...PendingBroadcast) error {
 	ki.mu.Lock()
 	defer ki.mu.Unlock()
 	return ki.db.Update(func(tx *bolt.Tx) error {
@@ -479,6 +482,9 @@ func (ki *KeyIndex) MarkRecoveryPendingAndReserveChange(fromAddr, changeAddr, sp
 			if change.State != StateFresh || change.Reserved {
 				return ErrAddressNotFresh
 			}
+		}
+		if err := putPendingForTransition(tx, spendTxID, fromAddr, "recovery", pending); err != nil {
+			return err
 		}
 		selected := recoveryOutpointSet(outpoints)
 		remaining := make([]RecoveryOutpoint, 0, len(from.RecoverableOutpoints)-len(outpoints))

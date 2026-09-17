@@ -7,6 +7,7 @@ package txbuilder
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -277,6 +278,119 @@ func SerializeBIP144(tx SignedP2QPKTx) ([]byte, error) {
 	writeLE32(&buf, tx.NLockTime)
 
 	return buf.Bytes(), nil
+}
+
+// TxIDFromBIP144 parses the actual signed bytes and hashes only their
+// non-witness serialization. This independently checks the bytes to persist.
+func TxIDFromBIP144(raw []byte) (string, error) {
+	if len(raw) < 12 || raw[4] != 0 || raw[5] != 1 {
+		return "", fmt.Errorf("txbuilder: invalid BIP144 marker or length")
+	}
+	offset := 6
+	end := len(raw) - 4
+	readCompact := func() (uint64, error) {
+		if offset >= end {
+			return 0, fmt.Errorf("txbuilder: truncated compact size")
+		}
+		prefix := raw[offset]
+		offset++
+		switch prefix {
+		case 0xfd:
+			if end-offset < 2 {
+				return 0, fmt.Errorf("txbuilder: truncated compact size")
+			}
+			v := binary.LittleEndian.Uint16(raw[offset:])
+			offset += 2
+			return uint64(v), nil
+		case 0xfe:
+			if end-offset < 4 {
+				return 0, fmt.Errorf("txbuilder: truncated compact size")
+			}
+			v := binary.LittleEndian.Uint32(raw[offset:])
+			offset += 4
+			return uint64(v), nil
+		case 0xff:
+			if end-offset < 8 {
+				return 0, fmt.Errorf("txbuilder: truncated compact size")
+			}
+			v := binary.LittleEndian.Uint64(raw[offset:])
+			offset += 8
+			return v, nil
+		default:
+			return uint64(prefix), nil
+		}
+	}
+	skip := func(length uint64) error {
+		if length > uint64(end-offset) {
+			return fmt.Errorf("txbuilder: truncated signed transaction")
+		}
+		offset += int(length)
+		return nil
+	}
+	inputs, err := readCompact()
+	if err != nil || inputs == 0 {
+		return "", fmt.Errorf("txbuilder: missing inputs")
+	}
+	for i := uint64(0); i < inputs; i++ {
+		if err := skip(36); err != nil {
+			return "", err
+		}
+		length, err := readCompact()
+		if err != nil {
+			return "", err
+		}
+		if err := skip(length); err != nil {
+			return "", err
+		}
+		if err := skip(4); err != nil {
+			return "", err
+		}
+	}
+	outputs, err := readCompact()
+	if err != nil || outputs == 0 {
+		return "", fmt.Errorf("txbuilder: missing outputs")
+	}
+	for i := uint64(0); i < outputs; i++ {
+		if err := skip(8); err != nil {
+			return "", err
+		}
+		length, err := readCompact()
+		if err != nil {
+			return "", err
+		}
+		if err := skip(length); err != nil {
+			return "", err
+		}
+	}
+	witnessStart := offset
+	for i := uint64(0); i < inputs; i++ {
+		items, err := readCompact()
+		if err != nil {
+			return "", err
+		}
+		for j := uint64(0); j < items; j++ {
+			length, err := readCompact()
+			if err != nil {
+				return "", err
+			}
+			if err := skip(length); err != nil {
+				return "", err
+			}
+		}
+	}
+	if offset != end {
+		return "", fmt.Errorf("txbuilder: trailing or missing witness bytes")
+	}
+	var stripped bytes.Buffer
+	stripped.Write(raw[:4])
+	stripped.Write(raw[6:witnessStart])
+	stripped.Write(raw[end:])
+	first := sha256.Sum256(stripped.Bytes())
+	second := sha256.Sum256(first[:])
+	for left, right := 0, len(second)-1; left < right; left, right = left+1, right-1 {
+		second[left], second[right] = second[right], second[left]
+	}
+	return hex.EncodeToString(second[:]), nil
 }
 
 // P2QPKVirtualSize returns the exact vsize of a final transaction shape. P2QPK

@@ -458,7 +458,7 @@ func TestSignAndVerifyMessage(t *testing.T) {
 	}
 }
 
-func TestConcurrentSigningAllowsOnlyOneSuccess(t *testing.T) {
+func TestConcurrentDetachedMessageSigningLeavesAddressFunded(t *testing.T) {
 	w := newTestWallet(t)
 	addr, _ := w.NextReceiveAddress()
 	if err := testFundAddress(w, addr); err != nil {
@@ -482,8 +482,16 @@ func TestConcurrentSigningAllowsOnlyOneSuccess(t *testing.T) {
 			successes++
 		}
 	}
-	if successes != 1 {
-		t.Fatalf("successful concurrent signatures = %d, want exactly 1", successes)
+	if successes != 2 {
+		t.Fatalf("successful concurrent detached signatures = %d, want 2", successes)
+	}
+	rec, err := w.index.GetRecord(addr)
+	if err != nil || rec.State != keystore.StateFunded || rec.SpendTxID != "" {
+		t.Fatalf("detached signatures changed source lifecycle: record=%+v err=%v", rec, err)
+	}
+	pending, err := w.ListPendingBroadcasts()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("detached signatures created pending broadcasts: %d, err=%v", len(pending), err)
 	}
 }
 
@@ -561,6 +569,20 @@ func TestSignTransactionWithValidChange(t *testing.T) {
 	}
 	if len(signed.Signature) > slhdsa.SignatureSize {
 		t.Errorf("Signature length %d exceeds max %d", len(signed.Signature), slhdsa.SignatureSize)
+	}
+	// The placeholder carries no on-chain inputs or raw transaction and must
+	// not strand its source or reserve a change address.
+	source, err := w.index.GetRecord(from)
+	if err != nil || source.State != keystore.StateFunded || source.SpendTxID != "" {
+		t.Fatalf("placeholder signing changed source lifecycle: record=%+v err=%v", source, err)
+	}
+	changeRecord, err := w.index.GetRecord(change)
+	if err != nil || changeRecord.Reserved {
+		t.Fatalf("placeholder signing reserved change: record=%+v err=%v", changeRecord, err)
+	}
+	pending, err := w.ListPendingBroadcasts()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("placeholder signing created pending broadcasts: %d, err=%v", len(pending), err)
 	}
 
 	ok, err := VerifySignature(tx.MessageID, signed.Signature, signed.PublicKey)
@@ -659,12 +681,20 @@ func TestOnConfirmationFlagsWithoutDestroying(t *testing.T) {
 		t.Fatalf("SignMessage failed: %v", err)
 	}
 
+	// A detached proof is not a spend and must leave the source FUNDED.
+	rec, err := w.index.GetRecord(addr)
+	if err != nil || rec.State != keystore.StateFunded || rec.SpendTxID != "" {
+		t.Fatalf("SignMessage changed source lifecycle: record=%+v err=%v", rec, err)
+	}
+	if err := testSpendPending(w, addr); err != nil {
+		t.Fatalf("mark test spend pending: %v", err)
+	}
 	// Confirm at low depth — should flag SPENT without destroying key.
 	if err := w.OnConfirmation(addr, 1); err != nil {
 		t.Fatalf("OnConfirmation(1) failed: %v", err)
 	}
 
-	rec, err := w.index.GetRecord(addr)
+	rec, err = w.index.GetRecord(addr)
 	if err != nil {
 		t.Fatalf("GetRecord failed: %v", err)
 	}
@@ -1402,33 +1432,15 @@ func TestFullSymbiontLifecycle(t *testing.T) {
 		t.Fatalf("ObserveFunding failed: %v", err)
 	}
 
-	// 2. Spend: sign a transaction, change to a fresh address.
+	// 2. Spend through the real on-chain P2QPK path. The legacy
+	// SignTransaction placeholder cannot produce broadcastable bytes.
 	changeAddr, err := w.NextReceiveAddress()
 	if err != nil {
 		t.Fatalf("NextReceiveAddress (change) failed: %v", err)
 	}
-	changeHash, err := address.ToHash(changeAddr)
-	if err != nil {
-		t.Fatalf("address.ToHash failed: %v", err)
-	}
-	tx := QOGETransaction{
-		From:   receiveAddr,
-		To:     "qoge1recipientplaceholder",
-		Amount: 5000,
-		Change: changeAddr,
-		Outputs: []SpendOutput{
-			{Amount: 4900, Script: []byte{0x51}},
-			{Amount: 100, Script: append([]byte{0x52, 0x20}, changeHash...)},
-		},
-		MessageID: []byte("full-lifecycle-tx"),
-	}
-	signed, err := w.SignTransaction(tx)
-	if err != nil {
-		t.Fatalf("SignTransaction failed: %v", err)
-	}
-	ok, err := VerifySignature(tx.MessageID, signed.Signature, signed.PublicKey)
-	if err != nil || !ok {
-		t.Fatalf("transaction signature invalid: ok=%v err=%v", ok, err)
+	params := makeMinimalSpendParams(t, receiveAddr, changeAddr)
+	if _, _, err := w.SignP2QPKInput(params); err != nil {
+		t.Fatalf("SignP2QPKInput failed: %v", err)
 	}
 
 	// 3. Confirm: flags address SPENT (no key destruction yet).
@@ -2284,5 +2296,162 @@ func TestRecoverableSignerPreservesUnselectedRemainderImmediately(t *testing.T) 
 	}
 	if !sameWalletRecoveryOutpoints(rec.RecoveryPendingOutpoints, outpoints[:2]) {
 		t.Fatalf("pending subset = %+v, want %+v", rec.RecoveryPendingOutpoints, outpoints[:2])
+	}
+}
+
+func TestSignAndStorePendingBroadcastsAreAtomicAndIndependent(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 4)
+	for _, addr := range addresses[:2] {
+		if err := testFundAddress(w, addr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		params := makeMultiInputSpendParams(t, addresses[i], addresses[i+2], 2)
+		meta := PendingBroadcastDetails{Destination: "external-destination", DestinationType: "P2PKH", AmountSats: params.Outputs[0].Amount, FeeSats: 100_000}
+		raw, err := w.SignAndStoreP2QPKInputs(params, meta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		txid, err := txbuilder.TxIDFromBIP144(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := w.index.GetRecord(addresses[i])
+		if err != nil || record.State != keystore.StateSpendPending || record.SpendTxID != txid {
+			t.Fatalf("source %d state/txid = %+v, %v", i, record, err)
+		}
+		change, err := w.index.GetRecord(addresses[i+2])
+		if err != nil || !change.Reserved {
+			t.Fatalf("change %d not reserved: %+v, %v", i, change, err)
+		}
+	}
+	pending, err := w.ListPendingBroadcasts()
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("pending = %+v, %v", pending, err)
+	}
+	if pending[0].TxID == pending[1].TxID {
+		t.Fatal("two addresses share one pending entry")
+	}
+	for _, rec := range pending {
+		raw, err := hex.DecodeString(rec.RawHex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := txbuilder.TxIDFromBIP144(raw)
+		if err != nil || got != rec.TxID {
+			t.Fatalf("persisted raw txid %s != %s: %v", got, rec.TxID, err)
+		}
+	}
+}
+
+func TestSignAndStoreMetadataFailureLeavesNoPendingState(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 2)
+	if err := testFundAddress(w, addresses[0]); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, addresses[0], addresses[1], 2)
+	_, err := w.SignAndStoreP2QPKInputs(params, PendingBroadcastDetails{Destination: "destination", DestinationType: "P2PKH", AmountSats: params.Outputs[0].Amount, FeeSats: 1})
+	if err == nil {
+		t.Fatal("mismatched metadata accepted")
+	}
+	from, _ := w.index.GetRecord(addresses[0])
+	change, _ := w.index.GetRecord(addresses[1])
+	pending, _ := w.ListPendingBroadcasts()
+	if from.State != keystore.StateFunded || change.Reserved || len(pending) != 0 {
+		t.Fatalf("partial sign mutation: source=%s change=%v pending=%d", from.State, change.Reserved, len(pending))
+	}
+}
+
+func TestPendingBroadcastCommitConflictRollsBackSecondSource(t *testing.T) {
+	w := newTestWallet(t)
+	addresses := testFreshAddresses(t, w, 3)
+	for _, addr := range addresses[:2] {
+		if err := testFundAddress(w, addr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := makeMultiInputSpendParams(t, addresses[0], addresses[2], 2)
+	first.ChangeAddr = ""
+	first.Outputs = first.Outputs[:1]
+	meta := PendingBroadcastDetails{Destination: "destination", DestinationType: "P2PKH", AmountSats: first.Outputs[0].Amount, FeeSats: 50_000_000}
+	if _, err := w.SignAndStoreP2QPKInputs(first, meta); err != nil {
+		t.Fatal(err)
+	}
+	second := makeMultiInputSpendParams(t, addresses[1], addresses[2], 2)
+	second.ChangeAddr = ""
+	second.Outputs = second.Outputs[:1]
+	if p2qpkTxID(first) != p2qpkTxID(second) {
+		t.Fatal("test setup needs same serialized txid")
+	}
+	if _, err := w.SignAndStoreP2QPKInputs(second, meta); !errors.Is(err, keystore.ErrPendingBroadcastConflict) {
+		t.Fatalf("second sign error=%v", err)
+	}
+	rec, err := w.index.GetRecord(addresses[1])
+	if err != nil || rec.State != keystore.StateFunded || rec.SpendTxID != "" {
+		t.Fatalf("failed atomic commit changed source: %+v, %v", rec, err)
+	}
+	pending, err := w.ListPendingBroadcasts()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+}
+
+func TestPendingBroadcastSurvivesWalletRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pending.db")
+	seed, err := GenerateMasterSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenSeed := append([]byte(nil), seed...)
+	w, err := CreateNew(path, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses := testFreshAddresses(t, w, 2)
+	if err := testFundAddress(w, addresses[0]); err != nil {
+		t.Fatal(err)
+	}
+	params := makeMultiInputSpendParams(t, addresses[0], addresses[1], 2)
+	meta := PendingBroadcastDetails{Destination: "destination", DestinationType: "P2PKH", AmountSats: params.Outputs[0].Amount, FeeSats: 100_000}
+	raw, err := w.SignAndStoreP2QPKInputs(params, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenExisting(path, reopenSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	entries, err := reopened.ListPendingBroadcasts()
+	if err != nil || len(entries) != 1 || entries[0].RawHex != hex.EncodeToString(raw) {
+		t.Fatalf("reopened entries=%+v err=%v", entries, err)
+	}
+}
+
+func TestSignAndStoreRecoveryPersistsRawWithPendingLock(t *testing.T) {
+	w := newTestWallet(t)
+	from, _, params, outpoints := prepareRecoverableSpent(t, w, 1)
+	params.ChangeAddr = ""
+	params.Outputs = []SpendOutput{{Amount: 50_000_000, Script: []byte{0x51}}}
+	raw, err := w.SignAndStoreRecoverableP2QPKInputs(params, PendingBroadcastDetails{Destination: "destination", DestinationType: "P2PKH", AmountSats: 50_000_000, FeeSats: 50_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := w.ListPendingBroadcasts()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries=%+v err=%v", entries, err)
+	}
+	if entries[0].Kind != "recovery" || entries[0].SourceAddress != from || entries[0].RawHex != hex.EncodeToString(raw) {
+		t.Fatalf("recovery pending record=%+v", entries[0])
+	}
+	rec, _ := w.index.GetRecord(from)
+	if len(rec.RecoveryPendingOutpoints) != 1 || !sameWalletRecoveryOutpoints(rec.RecoveryPendingOutpoints, outpoints) || rec.RecoverySpendTxID != entries[0].TxID {
+		t.Fatalf("recovery lock=%+v", rec)
 	}
 }

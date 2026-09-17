@@ -468,10 +468,45 @@ func broadcastAndRecord(send func() (string, error), record func(string) error) 
 	return txid, record(txid), nil
 }
 
-func newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
-	tabs := container.NewAppTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
+// broadcastAndSettlePending treats a successful RPC send as irreversible:
+// local history and pending-entry cleanup are independent best-effort writes.
+func broadcastAndSettlePending(send func() (string, error), record func(string) error, clear func(string) error) (string, error, error, error) {
+	txid, err := send()
+	if err != nil {
+		return "", nil, nil, err
+	}
+	historyErr := record(txid)
+	clearErr := clear(txid)
+	return txid, historyErr, clearErr, nil
+}
+
+// inspectPendingBroadcast distinguishes unknown, unrelayed, mempool, and
+// confirmed transactions without deleting anything on an ambiguous lookup.
+func inspectPendingBroadcast(rec keystore.PendingBroadcast, lookup func(string) (int, bool, error), confirmed func(keystore.PendingBroadcast, int) error, clear func(string) error) (string, bool, error) {
+	confirmations, found, err := lookup(rec.TxID)
+	if err != nil {
+		return "Status uncertain: " + err.Error(), false, err
+	}
+	if !found {
+		return "Not found on connected node — test before broadcast", true, nil
+	}
+	if confirmations < 1 {
+		return "Already relayed, awaiting confirmation", false, nil
+	}
+	if err := confirmed(rec, confirmations); err != nil {
+		return "Confirmed, but wallet reconciliation failed: " + err.Error(), false, err
+	}
+	if err := clear(rec.TxID); err != nil {
+		return "Confirmed, but pending-entry cleanup failed: " + err.Error(), false, err
+	}
+	return "Confirmed and cleared", false, nil
+}
+
+func newMainTabs(walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab *container.TabItem) *container.AppTabs {
+	tabs := container.NewAppTabs(walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab)
 	tabs.DisableItem(addressesTab)
 	tabs.DisableItem(transactionsTab)
+	tabs.DisableItem(pendingTab)
 	tabs.DisableItem(recoveryTab)
 	tabs.DisableItem(sendTab)
 	return tabs
@@ -568,10 +603,11 @@ func main() {
 	var wlt *wallet.Wallet
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
-	var addressesTab, transactionsTab, recoveryTab, sendTab *container.TabItem
+	var addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab *container.TabItem
 	var rpcFooterStatus *widget.Label
 	var renderTransactions func()
-	var addressesNavBtn, transactionsNavBtn, recoveryNavBtn, sendNavBtn *widget.Button
+	var renderPending func()
+	var addressesNavBtn, transactionsNavBtn, pendingNavBtn, recoveryNavBtn, sendNavBtn *widget.Button
 
 	// ── Wallet tab ──────────────────────────────────────────────────────────────
 
@@ -659,6 +695,7 @@ func main() {
 		if tabs != nil {
 			tabs.EnableItem(addressesTab)
 			tabs.EnableItem(transactionsTab)
+			tabs.EnableItem(pendingTab)
 			tabs.EnableItem(recoveryTab)
 			tabs.EnableItem(sendTab)
 		}
@@ -670,6 +707,9 @@ func main() {
 		}
 		if transactionsNavBtn != nil {
 			transactionsNavBtn.Enable()
+		}
+		if pendingNavBtn != nil {
+			pendingNavBtn.Enable()
 		}
 		if recoveryNavBtn != nil {
 			recoveryNavBtn.Enable()
@@ -1134,6 +1174,9 @@ func main() {
 		if renderTransactions != nil {
 			renderTransactions()
 		}
+		if renderPending != nil {
+			renderPending()
+		}
 	})
 	refreshBtn.Importance = widget.LowImportance
 	refreshBtn.IconPlacement = widget.ButtonIconTrailingText
@@ -1229,6 +1272,160 @@ func main() {
 	refreshHistoryBtn.Importance = widget.LowImportance
 	transactionsTab = container.NewTabItem("Transactions", container.NewBorder(container.NewVBox(pageTitle("Transactions"), pageIntro("Local write-once history anchored by transaction ID. Internal change is excluded."), container.NewHBox(hideOutgoingCheck, hideIncomingCheck), container.NewCenter(refreshHistoryBtn)), historyStatus, nil, nil, historyScroll))
 
+	// ── Pending Broadcasts tab ──────────────────────────────────────────────
+	pendingList := container.NewVBox()
+	pendingStatus := widget.NewLabel("Open a wallet to see signed transactions waiting to broadcast.")
+	pendingStatus.Wrapping = fyne.TextWrapWord
+	pendingScroll := container.NewVScroll(pendingList)
+	pendingScroll.SetMinSize(fyne.NewSize(0, 120))
+	renderPending = func() {
+		pendingList.RemoveAll()
+		if wlt == nil {
+			pendingStatus.SetText("Open a wallet first.")
+			return
+		}
+		records, err := wlt.ListPendingBroadcasts()
+		if err != nil {
+			pendingStatus.SetText(fmt.Sprintf("Pending broadcasts read failed: %v", err))
+			return
+		}
+		visible := 0
+		for _, record := range records {
+			rec := record
+			state := "Node disconnected — status unchecked"
+			eligible := false
+			decoded, decodeErr := hex.DecodeString(rec.RawHex)
+			derivedTxID, txidErr := txbuilder.TxIDFromBIP144(decoded)
+			validRaw := decodeErr == nil && txidErr == nil && derivedTxID == rec.TxID
+			if !validRaw {
+				state = "Saved raw transaction is invalid or its txid mismatches — broadcast disabled"
+			}
+			if rpc != nil && validRaw {
+				state, eligible, _ = inspectPendingBroadcast(rec,
+					func(txid string) (int, bool, error) { return rpc.TransactionConfirmations(context.Background(), txid) },
+					func(entry keystore.PendingBroadcast, confirmations int) error {
+						if entry.Kind == "spend" {
+							infos, err := wlt.ListAddresses()
+							if err != nil {
+								return err
+							}
+							for _, info := range infos {
+								if info.Address != entry.SourceAddress {
+									continue
+								}
+								if info.State == keystore.StateSpent && info.SpendTxID == entry.TxID {
+									return nil
+								}
+								_, err := wlt.ObserveSpendConfirmation(entry.SourceAddress, entry.TxID, confirmations)
+								return err
+							}
+							return fmt.Errorf("pending source address not found")
+						}
+						scan, err := rpc.ScanTxOutSet(context.Background(), []string{"addr(" + entry.SourceAddress + ")"})
+						if err != nil {
+							return err
+						}
+						statuses, err := rpcclient.AnalyzeFunding(scan, []string{entry.SourceAddress})
+						if err != nil {
+							return err
+						}
+						outpoints, err := recoverableOutpoints(scan, entry.SourceAddress)
+						if err != nil {
+							return err
+						}
+						status := statuses[entry.SourceAddress]
+						if _, err := wlt.ObserveRecoverableBalance(entry.SourceAddress, status.BalanceSats, status.Confirmations, outpoints); err != nil {
+							return err
+						}
+						infos, err := wlt.ListAddresses()
+						if err != nil {
+							return err
+						}
+						for _, info := range infos {
+							if info.Address == entry.SourceAddress {
+								if len(info.RecoveryPendingOutpoints) > 0 {
+									return fmt.Errorf("confirmed recovery still has pending outpoints on node")
+								}
+								return nil
+							}
+						}
+						return fmt.Errorf("recovery source address not found")
+					},
+					func(txid string) error { return wlt.DeletePendingBroadcast(txid) })
+				if state == "Confirmed and cleared" {
+					continue
+				}
+			}
+			visible++
+			details := fmt.Sprintf("%s\nFrom: %s\nTo: %s (%s)\nAmount: %s QOGE    Fee: %s QOGE\nSigned: %s\nTxid: %s\n%s", strings.ToUpper(rec.Kind), rec.SourceAddress, rec.Destination, rec.DestinationType, rpcclient.FormatQOGE(rec.AmountSats), rpcclient.FormatQOGE(rec.FeeSats), rec.SignedAt.Local().Format(time.RFC3339), rec.TxID, state)
+			copyBtn := widget.NewButtonWithIcon("Copy txid", theme.ContentCopyIcon(), func() { w.Clipboard().SetContent(rec.TxID); pendingStatus.SetText("Transaction ID copied.") })
+			testBtn := widget.NewButton("Test Transaction", nil)
+			broadcastBtn := widget.NewButton("⚠ Broadcast Transaction", nil)
+			broadcastBtn.Importance = widget.DangerImportance
+			broadcastBtn.Disable()
+			if !eligible || rpc == nil {
+				testBtn.Disable()
+			} else {
+				gate := &broadcastGate{}
+				testBtn.OnTapped = func() {
+					gate.Reset(broadcastBtn)
+					result, err := rpc.TestMempoolAccept(context.Background(), rec.RawHex)
+					if err != nil {
+						pendingStatus.SetText(fmt.Sprintf("Mempool test failed: %v", err))
+						return
+					}
+					if !result.Allowed || (result.Txid != "" && result.Txid != rec.TxID) {
+						pendingStatus.SetText(fmt.Sprintf("Mempool test rejected: %s", result.RejectReason))
+						return
+					}
+					gate.RecordMempoolResult(rec.RawHex, true, broadcastBtn)
+					pendingStatus.SetText("Mempool test allowed this exact signed transaction.")
+				}
+				broadcastBtn.OnTapped = func() {
+					if !gate.Allows(rec.RawHex) {
+						pendingStatus.SetText("Test this transaction before broadcasting.")
+						return
+					}
+					message := fmt.Sprintf("Broadcast saved %s transaction?\n\nDestination: %s\nType: %s\nAmount: %s QOGE\nFee: %s QOGE\nTxid: %s", rec.Kind, rec.Destination, rec.DestinationType, rpcclient.FormatQOGE(rec.AmountSats), rpcclient.FormatQOGE(rec.FeeSats), rec.TxID)
+					dialog.ShowConfirm("Confirm Pending Broadcast", message, func(ok bool) {
+						if !ok || !gate.Allows(rec.RawHex) {
+							return
+						}
+						confirmations, found, err := rpc.TransactionConfirmations(context.Background(), rec.TxID)
+						if err != nil || found {
+							pendingStatus.SetText(fmt.Sprintf("Broadcast stopped: node lookup changed (found=%v, confirmations=%d, error=%v). Refresh first.", found, confirmations, err))
+							gate.Reset(broadcastBtn)
+							return
+						}
+						txid, historyErr, clearErr, err := broadcastAndSettlePending(
+							func() (string, error) { return rpc.SendRawTransaction(context.Background(), rec.RawHex) },
+							func(txid string) error {
+								return wlt.RecordOutgoingTransaction(wallet.OutgoingTransaction{TxID: txid, SourceAddress: rec.SourceAddress, Destination: rec.Destination, DestinationType: rec.DestinationType, AmountSats: rec.AmountSats, FeeSats: rec.FeeSats, BroadcastAt: time.Now().UTC()})
+							},
+							func(txid string) error { return wlt.DeletePendingBroadcast(txid) },
+						)
+						if err != nil {
+							pendingStatus.SetText(fmt.Sprintf("Broadcast failed: %v", err))
+							return
+						}
+						gate.Reset(broadcastBtn)
+						renderPending()
+						renderTransactions()
+						pendingStatus.SetText(fmt.Sprintf("Broadcast succeeded: %s. History warning: %v. Cleanup warning: %v", txid, historyErr, clearErr))
+					}, w)
+				}
+			}
+			pendingList.Add(container.NewVBox(widget.NewLabel(details), container.NewHBox(copyBtn, testBtn, broadcastBtn), widget.NewSeparator()))
+		}
+		if visible == 0 {
+			pendingList.Add(widget.NewLabel("No signed transactions waiting to broadcast."))
+		}
+		pendingList.Refresh()
+		pendingStatus.SetText(fmt.Sprintf("%d pending signed transaction(s). Status checked against the connected node when available.", visible))
+	}
+	refreshPendingBtn := widget.NewButtonWithIcon("Refresh pending broadcasts", theme.ViewRefreshIcon(), func() { renderPending() })
+	pendingTab = container.NewTabItem("Pending Broadcasts", container.NewBorder(container.NewVBox(pageTitle("Pending Broadcasts"), pageIntro("Signed transactions are stored in this wallet until broadcast or confirmation. Verify each destination before broadcasting."), container.NewCenter(refreshPendingBtn)), pendingStatus, nil, nil, pendingScroll))
+
 	// ── Recover from Spent tab ─────────────────────────────────────────────
 	recoverySource := widget.NewSelect(nil, nil)
 	recoveryDestination := widget.NewEntry()
@@ -1319,11 +1516,12 @@ func main() {
 				recoveryStatus.SetText("Recovery broadcast blocked — signed transaction changed.")
 				return
 			}
-			txid, historyErr, err := broadcastAndRecord(
+			txid, historyErr, clearErr, err := broadcastAndSettlePending(
 				func() (string, error) { return rpc.SendRawTransaction(context.Background(), ctx.rawHex) },
 				func(txid string) error {
 					return wlt.RecordOutgoingTransaction(wallet.OutgoingTransaction{TxID: txid, SourceAddress: ctx.source, Destination: ctx.destination, DestinationType: string(ctx.destinationType), AmountSats: ctx.amountSats, FeeSats: ctx.feeSats, BroadcastAt: time.Now().UTC()})
 				},
+				func(txid string) error { return wlt.DeletePendingBroadcast(txid) },
 			)
 			if err != nil {
 				recoveryStatus.SetText(fmt.Sprintf("sendrawtransaction RPC error: %v", err))
@@ -1335,6 +1533,12 @@ func main() {
 			} else {
 				recoveryStatus.SetText(fmt.Sprintf("Recovery broadcast successfully. Txid: %s", txid))
 				renderTransactions()
+			}
+			if clearErr != nil {
+				recoveryStatus.SetText(recoveryStatus.Text + fmt.Sprintf("\nWARNING: pending-broadcast cleanup failed: %v", clearErr))
+			}
+			if renderPending != nil {
+				renderPending()
 			}
 		}, w)
 	}
@@ -1391,18 +1595,9 @@ func main() {
 				return
 			}
 			params := wallet.P2QPKSpendParams{NVersion: 2, Inputs: prepared.WalletInputs, SpentUTXOs: prepared.SpentUTXOs, Outputs: []wallet.SpendOutput{{Amount: plan.SendSats, Script: destination.ScriptPubKey}}, FromAddr: fromAddr}
-			pubKey, signatures, err := wlt.SignRecoverableP2QPKInputs(params)
+			raw, err := wlt.SignAndStoreRecoverableP2QPKInputs(params, wallet.PendingBroadcastDetails{Destination: toAddr, DestinationType: string(destination.Type), AmountSats: plan.SendSats, FeeSats: plan.FeeSats})
 			if err != nil {
-				recoveryStatus.SetText(fmt.Sprintf("Recovery signing failed: %v", err))
-				return
-			}
-			witnesses := make([]txbuilder.P2QPKWitness, len(signatures))
-			for i, signature := range signatures {
-				witnesses[i] = txbuilder.P2QPKWitness{Sig: signature, PubKey: pubKey}
-			}
-			raw, err := txbuilder.SerializeBIP144(txbuilder.SignedP2QPKTx{NVersion: 2, Inputs: prepared.TxInputs, Outputs: []txbuilder.TxOutput{{Amount: plan.SendSats, Script: destination.ScriptPubKey}}, Witnesses: witnesses})
-			if err != nil {
-				recoveryStatus.SetText(fmt.Sprintf("Recovery serialization failed: %v", err))
+				recoveryStatus.SetText(fmt.Sprintf("Recovery signing or saving failed: %v", err))
 				return
 			}
 			recoverySignedHex = hex.EncodeToString(raw)
@@ -1578,11 +1773,12 @@ func main() {
 				broadcastGate.Reset(broadcastBtn)
 				return
 			}
-			txid, historyErr, err := broadcastAndRecord(
+			txid, historyErr, clearErr, err := broadcastAndSettlePending(
 				func() (string, error) { return rpc.SendRawTransaction(context.Background(), ctx.rawHex) },
 				func(txid string) error {
 					return wlt.RecordOutgoingTransaction(wallet.OutgoingTransaction{TxID: txid, SourceAddress: ctx.source, Destination: ctx.destination, DestinationType: string(ctx.destinationType), AmountSats: ctx.amountSats, FeeSats: ctx.feeSats, BroadcastAt: time.Now().UTC()})
 				},
+				func(txid string) error { return wlt.DeletePendingBroadcast(txid) },
 			)
 			if err != nil {
 				sendStatusLabel.SetText(fmt.Sprintf("sendrawtransaction RPC error: %v", err))
@@ -1596,6 +1792,12 @@ func main() {
 				if renderTransactions != nil {
 					renderTransactions()
 				}
+			}
+			if clearErr != nil {
+				sendStatusLabel.SetText(sendStatusLabel.Text + fmt.Sprintf("\nWARNING: pending-broadcast cleanup failed: %v", clearErr))
+			}
+			if renderPending != nil {
+				renderPending()
 			}
 		}, w)
 		confirm.SetConfirmText("Broadcast Now")
@@ -1787,7 +1989,6 @@ func main() {
 		}
 		var changeAddr string
 		spendOutputs := []wallet.SpendOutput{{Amount: sendSats, Script: toScript}}
-		txOutputs := []txbuilder.TxOutput{{Amount: sendSats, Script: toScript}}
 		if amounts.IncludeChange {
 			changeAddr, err = wlt.NextReceiveAddress()
 			if err != nil {
@@ -1804,7 +2005,6 @@ func main() {
 				return
 			}
 			spendOutputs = append(spendOutputs, wallet.SpendOutput{Amount: amounts.ChangeSats, Script: changeScript})
-			txOutputs = append(txOutputs, txbuilder.TxOutput{Amount: amounts.ChangeSats, Script: changeScript})
 		}
 		var utxoLines strings.Builder
 		for i, utxo := range prepared.UTXOs {
@@ -1883,22 +2083,9 @@ func main() {
 				Outputs: spendOutputs, InputIndex: 0,
 				FromAddr: fromAddr, ChangeAddr: changeAddr,
 			}
-			pubKey, signatures, err := wlt.SignP2QPKInputs(params)
+			raw, err := wlt.SignAndStoreP2QPKInputs(params, wallet.PendingBroadcastDetails{Destination: toAddr, DestinationType: string(toDestination.Type), AmountSats: sendSats, FeeSats: amounts.FeeSats})
 			if err != nil {
-				sendStatusLabel.SetText(fmt.Sprintf("SignP2QPKInputs error: %v", err))
-				return
-			}
-			witnesses := make([]txbuilder.P2QPKWitness, len(signatures))
-			for i, signature := range signatures {
-				witnesses[i] = txbuilder.P2QPKWitness{Sig: signature, PubKey: pubKey}
-			}
-			signed := txbuilder.SignedP2QPKTx{
-				NVersion: params.NVersion, NLockTime: params.NLockTime,
-				Inputs: prepared.TxInputs, Outputs: txOutputs, Witnesses: witnesses,
-			}
-			raw, err := txbuilder.SerializeBIP144(signed)
-			if err != nil {
-				sendStatusLabel.SetText(fmt.Sprintf("serialization error: %v", err))
+				sendStatusLabel.SetText(fmt.Sprintf("Signing or saving transaction failed: %v", err))
 				return
 			}
 			signedTxHex = hex.EncodeToString(raw)
@@ -1975,25 +2162,27 @@ func main() {
 
 	// ── Window layout ──────────────────────────────────────────────────────
 
-	tabs = newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
+	tabs = newMainTabs(walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab)
 
 	walletNavBtn := widget.NewButtonWithIcon("Wallet", theme.AccountIcon(), nil)
 	addressesNavBtn = widget.NewButtonWithIcon("My Addresses", theme.ListIcon(), nil)
 	transactionsNavBtn = widget.NewButtonWithIcon("Transactions", theme.HistoryIcon(), nil)
+	pendingNavBtn = widget.NewButtonWithIcon("Pending Broadcasts", theme.WarningIcon(), nil)
 	recoveryNavBtn = widget.NewButtonWithIcon("Recover from Spent", theme.WarningIcon(), nil)
 	sendNavBtn = widget.NewButtonWithIcon("Send", theme.MailSendIcon(), nil)
 	networkNavBtn := widget.NewButtonWithIcon("Network", theme.SettingsIcon(), nil)
-	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, transactionsNavBtn, recoveryNavBtn, sendNavBtn, networkNavBtn}
+	navButtons := []*widget.Button{walletNavBtn, addressesNavBtn, transactionsNavBtn, pendingNavBtn, recoveryNavBtn, sendNavBtn, networkNavBtn}
 	for _, button := range navButtons {
 		button.Alignment = widget.ButtonAlignLeading
 	}
 	addressesNavBtn.Disable()
 	transactionsNavBtn.Disable()
+	pendingNavBtn.Disable()
 	recoveryNavBtn.Disable()
 	sendNavBtn.Disable()
 
-	pages := []*container.TabItem{walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab}
-	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, transactionsTab.Content, recoveryTab.Content, sendTab.Content, networkTab.Content)
+	pages := []*container.TabItem{walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab}
+	pageHost := container.NewStack(walletTab.Content, addressesTab.Content, transactionsTab.Content, pendingTab.Content, recoveryTab.Content, sendTab.Content, networkTab.Content)
 	selectPage := func(selected *container.TabItem, selectedButton *widget.Button) {
 		tabs.Select(selected)
 		for i, page := range pages {
@@ -2012,6 +2201,7 @@ func main() {
 	walletNavBtn.OnTapped = func() { selectPage(walletTab, walletNavBtn) }
 	addressesNavBtn.OnTapped = func() { selectPage(addressesTab, addressesNavBtn) }
 	transactionsNavBtn.OnTapped = func() { selectPage(transactionsTab, transactionsNavBtn) }
+	pendingNavBtn.OnTapped = func() { selectPage(pendingTab, pendingNavBtn); renderPending() }
 	recoveryNavBtn.OnTapped = func() { selectPage(recoveryTab, recoveryNavBtn) }
 	sendNavBtn.OnTapped = func() { selectPage(sendTab, sendNavBtn) }
 	networkNavBtn.OnTapped = func() { selectPage(networkTab, networkNavBtn) }
@@ -2027,6 +2217,7 @@ func main() {
 		navItem(walletNavBtn),
 		navItem(addressesNavBtn),
 		navItem(transactionsNavBtn),
+		navItem(pendingNavBtn),
 		navItem(recoveryNavBtn),
 		navItem(sendNavBtn),
 		navItem(networkNavBtn),

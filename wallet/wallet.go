@@ -31,9 +31,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/saogen/qoge-sphincs-wallet/address"
 	"github.com/saogen/qoge-sphincs-wallet/internal/txbuilder"
@@ -472,20 +474,13 @@ func (w *Wallet) ListAddresses() ([]AddressInfo, error) {
 //
 //	hash = SHA256(SHA256("Qogecoin Signed Message:" || SHA256(message)))
 //
-// Returns the 32-byte public key and ~17 KB SLH-DSA signature.
-// The caller is responsible for broadcasting the transaction promptly —
-// the mempool window is ~60 seconds at 1-minute block time.
+// Returns the 32-byte public key and ~17 KB SLH-DSA signature. This is a
+// detached proof, not a transaction: no lifecycle state is changed and there
+// are no transaction bytes to broadcast. Sharing it reveals the public key.
 func (w *Wallet) SignMessage(fromAddr string, message []byte) (pubKey, sig []byte, err error) {
 	w.signMu.Lock()
 	defer w.signMu.Unlock()
-	pubKey, sig, err = w.signMessage(fromAddr, message)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := w.index.MarkSpendPendingAndReserveChange(fromAddr, "", ""); err != nil {
-		return nil, nil, fmt.Errorf("wallet: SignMessage: finalize lifecycle: %w", err)
-	}
-	return pubKey, sig, nil
+	return w.signMessage(fromAddr, message)
 }
 
 // signMessage performs the cryptographic operation without changing lifecycle
@@ -522,7 +517,9 @@ func (w *Wallet) signMessage(fromAddr string, message []byte) (pubKey, sig []byt
 	return rec.PublicKey, signature, nil
 }
 
-// SignTransaction signs a QOGE transaction.
+// SignTransaction signs a legacy placeholder message, not a broadcastable
+// QOGE transaction. It does not advance lifecycle state or reserve change;
+// actual on-chain spends must use SignAndStoreP2QPKInputs.
 // The change address in tx.Change MUST be a FRESH address from this wallet.
 //
 // M1.6: This method is the integration point for the QOGE chain tx format.
@@ -570,10 +567,6 @@ func (w *Wallet) SignTransaction(tx QOGETransaction) (*SignedTransaction, error)
 	pubKey, sig, err := w.signMessage(tx.From, tx.MessageID)
 	if err != nil {
 		return nil, err
-	}
-
-	if err := w.index.MarkSpendPendingAndReserveChange(tx.From, tx.Change, ""); err != nil {
-		return nil, fmt.Errorf("wallet: SignTransaction: finalize lifecycle: %w", err)
 	}
 
 	return &SignedTransaction{
@@ -790,13 +783,42 @@ func (w *Wallet) SignP2QPKInput(params P2QPKSpendParams) (pubKey, sig []byte, er
 
 // SignP2QPKInputs signs a normal FUNDED source and deliberately retains its strict gate.
 func (w *Wallet) SignP2QPKInputs(params P2QPKSpendParams) ([]byte, [][]byte, error) {
-	return w.signP2QPKInputs(params, false)
+	return w.signP2QPKInputs(params, false, nil, nil)
 }
 
 // SignRecoverableP2QPKInputs is the only signing entry point for a SPENT source.
 // It requires explicit, Refresh-authorized recoverable outpoints.
 func (w *Wallet) SignRecoverableP2QPKInputs(params P2QPKSpendParams) ([]byte, [][]byte, error) {
-	return w.signP2QPKInputs(params, true)
+	return w.signP2QPKInputs(params, true, nil, nil)
+}
+
+// PendingBroadcastDetails supplies GUI-reviewed display metadata. The raw
+// transaction itself is generated and persisted inside the signing call.
+type PendingBroadcastDetails struct {
+	Destination     string
+	DestinationType string
+	AmountSats      int64
+	FeeSats         int64
+}
+
+func (w *Wallet) SignAndStoreP2QPKInputs(params P2QPKSpendParams, details PendingBroadcastDetails) ([]byte, error) {
+	var raw []byte
+	_, _, err := w.signP2QPKInputs(params, false, &details, &raw)
+	return raw, err
+}
+
+func (w *Wallet) SignAndStoreRecoverableP2QPKInputs(params P2QPKSpendParams, details PendingBroadcastDetails) ([]byte, error) {
+	var raw []byte
+	_, _, err := w.signP2QPKInputs(params, true, &details, &raw)
+	return raw, err
+}
+
+func (w *Wallet) ListPendingBroadcasts() ([]keystore.PendingBroadcast, error) {
+	return w.index.ListPendingBroadcasts()
+}
+
+func (w *Wallet) DeletePendingBroadcast(txid string) error {
+	return w.index.DeletePendingBroadcast(txid)
 }
 
 // signP2QPKInputs signs every input in one atomic wallet operation. All input,
@@ -804,7 +826,7 @@ func (w *Wallet) SignRecoverableP2QPKInputs(params P2QPKSpendParams) ([]byte, []
 // produced. The signing mutex remains held through every SLH-DSA operation, and
 // FUNDED -> SPEND_PENDING, change reservation, and spend-txid persistence occur
 // only after every input has a signature.
-func (w *Wallet) signP2QPKInputs(params P2QPKSpendParams, recovery bool) (pubKey []byte, signatures [][]byte, err error) {
+func (w *Wallet) signP2QPKInputs(params P2QPKSpendParams, recovery bool, details *PendingBroadcastDetails, rawOut *[]byte) (pubKey []byte, signatures [][]byte, err error) {
 	w.signMu.Lock()
 	defer w.signMu.Unlock()
 	rec, err := w.index.GetRecord(params.FromAddr)
@@ -949,15 +971,69 @@ func (w *Wallet) signP2QPKInputs(params P2QPKSpendParams, recovery bool) (pubKey
 		}
 	}
 
+	// Construct the final BIP144 bytes before any lifecycle or recovery-lock
+	// write. If serialization fails, the source remains eligible to retry.
+	signed := txbuilder.SignedP2QPKTx{NVersion: params.NVersion, NLockTime: params.NLockTime}
+	for _, input := range params.Inputs {
+		signed.Inputs = append(signed.Inputs, txbuilder.TxInput(input))
+	}
+	for _, output := range params.Outputs {
+		signed.Outputs = append(signed.Outputs, txbuilder.TxOutput{Amount: output.Amount, Script: output.Script})
+	}
+	for _, signature := range signatures {
+		signed.Witnesses = append(signed.Witnesses, txbuilder.P2QPKWitness{Sig: signature, PubKey: rec.PublicKey})
+	}
+	raw, err := txbuilder.SerializeBIP144(signed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wallet: serialize signed transaction: %w", err)
+	}
 	spendTxID := p2qpkTxID(params)
+	serializedTxID, err := txbuilder.TxIDFromBIP144(raw)
+	if err != nil || serializedTxID != spendTxID {
+		return nil, nil, fmt.Errorf("wallet: serialized transaction ID does not match tracked spend ID: %v", err)
+	}
+	var totalInput, totalOutput int64
+	for _, spent := range params.SpentUTXOs {
+		if totalInput > math.MaxInt64-spent.Amount {
+			return nil, nil, fmt.Errorf("wallet: input total overflows")
+		}
+		totalInput += spent.Amount
+	}
+	for _, output := range params.Outputs {
+		if totalOutput > math.MaxInt64-output.Amount {
+			return nil, nil, fmt.Errorf("wallet: output total overflows")
+		}
+		totalOutput += output.Amount
+	}
+	feeSats := int64(0)
+	if totalOutput <= totalInput {
+		feeSats = totalInput - totalOutput
+	}
+	metadata := PendingBroadcastDetails{Destination: "script:" + hex.EncodeToString(params.Outputs[0].Script), DestinationType: "script", AmountSats: params.Outputs[0].Amount, FeeSats: feeSats}
+	if details != nil {
+		if totalOutput > totalInput {
+			return nil, nil, fmt.Errorf("wallet: outputs exceed inputs")
+		}
+		if details.Destination == "" || details.DestinationType == "" || details.AmountSats != params.Outputs[0].Amount || details.FeeSats != metadata.FeeSats {
+			return nil, nil, fmt.Errorf("wallet: pending-broadcast metadata does not match signed outputs")
+		}
+		metadata = *details
+	}
+	kind := "spend"
 	if recovery {
-		if err := w.index.MarkRecoveryPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID, recoveryOutpoints); err != nil {
+		kind = "recovery"
+	}
+	pending := keystore.PendingBroadcast{TxID: spendTxID, RawHex: hex.EncodeToString(raw), Kind: kind, SourceAddress: params.FromAddr, Destination: metadata.Destination, DestinationType: metadata.DestinationType, AmountSats: metadata.AmountSats, FeeSats: metadata.FeeSats, SignedAt: time.Now().UTC()}
+	if recovery {
+		if err := w.index.MarkRecoveryPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID, recoveryOutpoints, pending); err != nil {
 			return nil, nil, fmt.Errorf("wallet: SignRecoverableP2QPKInputs: finalize recovery lock: %w", err)
 		}
-	} else if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID); err != nil {
+	} else if err := w.index.MarkSpendPendingAndReserveChange(params.FromAddr, params.ChangeAddr, spendTxID, pending); err != nil {
 		return nil, nil, fmt.Errorf("wallet: SignP2QPKInput: finalize lifecycle: %w", err)
 	}
-
+	if rawOut != nil {
+		*rawOut = raw
+	}
 	return rec.PublicKey, signatures, nil
 }
 

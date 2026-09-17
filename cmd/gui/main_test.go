@@ -384,12 +384,13 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
+	pendingTab := container.NewTabItem("Pending Broadcasts", widget.NewLabel("pending"))
 	recoveryTab := container.NewTabItem("Recover from Spent", widget.NewLabel("recovery"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
 
-	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
-	wantOrder := []string{"Wallet", "My Addresses", "Transactions", "Recover from Spent", "Send", "Network"}
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab)
+	wantOrder := []string{"Wallet", "My Addresses", "Transactions", "Pending Broadcasts", "Recover from Spent", "Send", "Network"}
 	if len(tabs.Items) != len(wantOrder) {
 		t.Fatalf("tab count = %d, want %d", len(tabs.Items), len(wantOrder))
 	}
@@ -401,7 +402,7 @@ func TestMainTabsPutWalletFirstAndGateWalletDependentTabs(t *testing.T) {
 	if walletTab.Disabled() || networkTab.Disabled() {
 		t.Fatal("Wallet and Network must be available before a wallet is loaded")
 	}
-	for _, item := range []*container.TabItem{addressesTab, transactionsTab, recoveryTab, sendTab} {
+	for _, item := range []*container.TabItem{addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab} {
 		if !item.Disabled() {
 			t.Fatalf("%s tab enabled before wallet load", item.Text)
 		}
@@ -419,10 +420,11 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	walletTab := container.NewTabItem("Wallet", widget.NewLabel("wallet"))
 	addressesTab := container.NewTabItem("My Addresses", widget.NewLabel("addresses"))
 	transactionsTab := container.NewTabItem("Transactions", widget.NewLabel("transactions"))
+	pendingTab := container.NewTabItem("Pending Broadcasts", widget.NewLabel("pending"))
 	recoveryTab := container.NewTabItem("Recover from Spent", widget.NewLabel("recovery"))
 	sendTab := container.NewTabItem("Send", widget.NewLabel("send"))
 	networkTab := container.NewTabItem("Network", widget.NewLabel("network"))
-	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, recoveryTab, sendTab, networkTab)
+	tabs := newMainTabs(walletTab, addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab, networkTab)
 	w := fynetest.NewWindow(tabs)
 	defer w.Close()
 	w.SetPadded(false)
@@ -432,7 +434,7 @@ func TestMainTabsHeadlessClickGating(t *testing.T) {
 	if tabs.Selected() != walletTab {
 		t.Fatalf("clicking disabled My Addresses selected %q, want Wallet", tabs.Selected().Text)
 	}
-	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(560, 10))
+	fynetest.TapCanvas(w.Canvas(), fyne.NewPos(680, 10))
 	if tabs.Selected() != networkTab {
 		t.Fatalf("clicking enabled Network selected %q, want Network", tabs.Selected().Text)
 	}
@@ -688,5 +690,70 @@ func TestSelectSpendInputsMaximumUsesOnlySmallest22(t *testing.T) {
 	}
 	if prepared.TotalSats != selection.SelectedTotal || selection.SelectedTotal != plan.SendSats+plan.FeeSats {
 		t.Fatalf("accounting mismatch: prepared=%d selection=%d plan=%+v", prepared.TotalSats, selection.SelectedTotal, plan)
+	}
+}
+
+func TestPendingBroadcastInspectionOutcomes(t *testing.T) {
+	record := keystore.PendingBroadcast{TxID: strings.Repeat("ab", 32)}
+	cases := []struct {
+		name          string
+		confirmations int
+		found         bool
+		lookupErr     error
+		wantEligible  bool
+		wantConfirmed int
+		wantDeleted   int
+	}{
+		{"not found", 0, false, nil, true, 0, 0},
+		{"mempool", 0, true, nil, false, 0, 0},
+		{"confirmed", 2, true, nil, false, 1, 1},
+		{"lookup error", 0, false, errors.New("txindex required"), false, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			confirmed, deleted := 0, 0
+			_, eligible, err := inspectPendingBroadcast(record,
+				func(string) (int, bool, error) { return tc.confirmations, tc.found, tc.lookupErr },
+				func(keystore.PendingBroadcast, int) error { confirmed++; return nil },
+				func(string) error { deleted++; return nil })
+			if eligible != tc.wantEligible || confirmed != tc.wantConfirmed || deleted != tc.wantDeleted || (err != nil) != (tc.lookupErr != nil) {
+				t.Fatalf("eligible=%v confirmed=%d deleted=%d err=%v", eligible, confirmed, deleted, err)
+			}
+		})
+	}
+}
+
+func TestPendingBroadcastConfirmedReconciliationFailureRetainsEntry(t *testing.T) {
+	rec := keystore.PendingBroadcast{TxID: strings.Repeat("cd", 32)}
+	deleted := false
+	_, eligible, err := inspectPendingBroadcast(rec,
+		func(string) (int, bool, error) { return 1, true, nil },
+		func(keystore.PendingBroadcast, int) error { return errors.New("state mismatch") },
+		func(string) error { deleted = true; return nil })
+	if err == nil || eligible || deleted {
+		t.Fatalf("err=%v eligible=%v deleted=%v", err, eligible, deleted)
+	}
+}
+
+func TestBroadcastSettlementClearsIndependentlyOfHistory(t *testing.T) {
+	for _, historyFails := range []bool{false, true} {
+		cleared := 0
+		txid, historyErr, clearErr, err := broadcastAndSettlePending(
+			func() (string, error) { return "txid", nil },
+			func(string) error {
+				if historyFails {
+					return errors.New("history write failed")
+				}
+				return nil
+			},
+			func(string) error { cleared++; return nil })
+		if err != nil || clearErr != nil || txid != "txid" || cleared != 1 || (historyErr != nil) != historyFails {
+			t.Fatalf("historyFails=%v txid=%s history=%v clear=%v err=%v cleared=%d", historyFails, txid, historyErr, clearErr, err, cleared)
+		}
+	}
+	cleared := 0
+	_, _, _, err := broadcastAndSettlePending(func() (string, error) { return "", errors.New("RPC failed") }, func(string) error { t.Fatal("recorded failed broadcast"); return nil }, func(string) error { cleared++; return nil })
+	if err == nil || cleared != 0 {
+		t.Fatalf("failed broadcast err=%v cleared=%d", err, cleared)
 	}
 }

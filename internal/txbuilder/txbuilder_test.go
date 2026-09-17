@@ -684,3 +684,30 @@ func TestSelectP2QPKMaximumUsesSmallest22Deterministically(t *testing.T) {
 		t.Fatalf("accounting: %d != %d + %d", selection.SelectedTotal, plan.SendSats, plan.FeeSats)
 	}
 }
+
+func TestTxIDFromBIP144HashesActualNonWitnessBytes(t *testing.T) {
+	tx := makeSyntheticTx(t)
+	raw, err := SerializeBIP144(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := TxIDFromBIP144(raw)
+	if err != nil || len(original) != 64 {
+		t.Fatalf("txid=%q err=%v", original, err)
+	}
+	changedWitness := append([]byte(nil), raw...)
+	changedWitness[len(changedWitness)-5] ^= 0x01
+	witnessTxID, err := TxIDFromBIP144(changedWitness)
+	if err != nil || witnessTxID != original {
+		t.Fatalf("witness changed txid: %s vs %s, err=%v", witnessTxID, original, err)
+	}
+	changedOutput := append([]byte(nil), raw...)
+	changedOutput[49] ^= 0x01
+	outputTxID, err := TxIDFromBIP144(changedOutput)
+	if err != nil || outputTxID == original {
+		t.Fatalf("output change failed to change txid: %s vs %s, err=%v", outputTxID, original, err)
+	}
+	if _, err := TxIDFromBIP144(raw[:len(raw)-10]); err == nil {
+		t.Fatal("truncated raw accepted")
+	}
+}

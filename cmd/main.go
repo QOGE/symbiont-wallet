@@ -106,8 +106,8 @@ mainMenu:
 		fmt.Println()
 		fmt.Println("── QOGE Wallet ────────────────────────────────────")
 		fmt.Println("  1. Get next receive address")
-		fmt.Println("  2. Sign message (FUNDED address)")
-		fmt.Println("  3. Simulate spend confirmation (SPEND_PENDING → SPENT)")
+		fmt.Println("  2. Sign detached message proof (FUNDED address; no spend)")
+		fmt.Println("  3. Simulate spend confirmation (demo only; requires a real pending spend)")
 		fmt.Println("  4. List addresses eligible for key purging")
 		fmt.Println("  5. Purge key for a SPENT address (PERMANENT — cannot be undone)")
 		fmt.Println("  6. Exit")
@@ -134,7 +134,8 @@ mainMenu:
 				fmt.Printf("  ✗ Error: %v\n", err)
 				continue
 			}
-			fmt.Printf("\n  ✓ Signed successfully.\n")
+			fmt.Printf("\n  ✓ Detached message signed. No transaction was created or broadcast.\n")
+			fmt.Println("  Address remains FUNDED; sharing this proof reveals its public key.")
 			fmt.Printf("  Public key : %s\n", hex.EncodeToString(pubKey))
 			fmt.Printf("  Sig length : %d bytes (expect ~17088 for SLH-DSA-SHA2-128f)\n", len(sig))
 			fmt.Printf("  Sig (first 32 bytes): %s...\n", hex.EncodeToString(sig[:min(32, len(sig))]))
