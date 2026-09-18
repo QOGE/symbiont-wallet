@@ -38,7 +38,7 @@ import (
 const (
 	localMainnetRPCEndpoint = "127.0.0.1:8332"
 	localRPCProbeTimeout    = 2 * time.Second
-	peerCountRPCTimeout     = 5 * time.Second
+	networkMetricRPCTimeout = 5 * time.Second
 	rpcCookieUsername       = "__cookie__"
 	transactionExplorerBase = "https://explorer.qoge.org/tx/"
 )
@@ -605,12 +605,16 @@ func main() {
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
 	var addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab *container.TabItem
-	var rpcFooterStatus, peerCountLabel *widget.Label
-	var peerLookupSeq uint64
-	resetPeerCount := func() {
+	var rpcFooterStatus, peerCountLabel, blockCountLabel *widget.Label
+	var peerLookupSeq, blockLookupSeq uint64
+	resetNetworkMetrics := func() {
 		peerLookupSeq++
+		blockLookupSeq++
 		if peerCountLabel != nil {
 			peerCountLabel.SetText("—")
+		}
+		if blockCountLabel != nil {
+			blockCountLabel.SetText("—")
 		}
 	}
 	var renderTransactions func()
@@ -742,7 +746,7 @@ func main() {
 			return candidate, nil
 		})
 		if connected && rpcFooterStatus != nil {
-			resetPeerCount()
+			resetNetworkMetrics()
 			updateRPCStatus(rpcFooterStatus, localMainnetRPCEndpoint, nil)
 		}
 	}
@@ -973,19 +977,19 @@ func main() {
 		pass := rpcPass.Text
 		if ep == "" {
 			rpc = nil
-			resetPeerCount()
+			resetNetworkMetrics()
 			updateRPCStatus(rpcFooterStatus, "", nil)
 			return
 		}
 		c := rpcclient.New(ep, user, pass)
 		if err := c.Ping(context.Background()); err != nil {
 			rpc = nil
-			resetPeerCount()
+			resetNetworkMetrics()
 			updateRPCStatus(rpcFooterStatus, "", fmt.Errorf("node unreachable: %w", err))
 			return
 		}
 		rpc = c
-		resetPeerCount()
+		resetNetworkMetrics()
 		updateRPCStatus(rpcFooterStatus, ep, nil)
 	})
 	connectBtn.Importance = widget.HighImportance
@@ -2259,7 +2263,7 @@ func main() {
 		requestID := peerLookupSeq
 		peerCountLabel.SetText("Checking…")
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), peerCountRPCTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), networkMetricRPCTimeout)
 			defer cancel()
 			count, err := client.GetConnectionCount(ctx)
 			fyne.Do(func() {
@@ -2275,10 +2279,37 @@ func main() {
 		}()
 	})
 	peerCountBtn.Importance = widget.LowImportance
+	blockCountLabel = widget.NewLabel("—")
+	blockCountBtn := widget.NewButtonWithIcon("Blocks", theme.GridIcon(), func() {
+		if rpc == nil {
+			blockCountLabel.SetText("Not connected")
+			return
+		}
+		client := rpc
+		blockLookupSeq++
+		requestID := blockLookupSeq
+		blockCountLabel.SetText("Checking…")
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), networkMetricRPCTimeout)
+			defer cancel()
+			height, err := client.GetBlockCount(ctx)
+			fyne.Do(func() {
+				if rpc != client || blockLookupSeq != requestID {
+					return
+				}
+				if err != nil {
+					blockCountLabel.SetText("Unavailable")
+					return
+				}
+				blockCountLabel.SetText(fmt.Sprintf("%d", height))
+			})
+		}()
+	})
+	blockCountBtn.Importance = widget.LowImportance
 	footer := container.NewStack(
 		canvas.NewRectangle(qgDisplayBg),
 		container.NewVBox(widget.NewSeparator(),
-			container.NewBorder(nil, nil, rpcFooterStatus, container.NewHBox(peerCountBtn, peerCountLabel), nil)),
+			container.NewBorder(nil, nil, rpcFooterStatus, container.NewHBox(peerCountBtn, peerCountLabel, blockCountBtn, blockCountLabel), nil)),
 	)
 	pageContent := container.New(layout.NewCustomPaddedLayout(12, 12, 16, 16), pageHost)
 	content := container.NewBorder(nil, nil,

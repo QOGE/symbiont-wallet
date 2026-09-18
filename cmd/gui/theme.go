@@ -531,5 +531,3 @@ func newSummaryCard(title, caption string, accent color.Color) (*summaryValue, f
 	card := container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), inner))
 	return &summaryValue{text: value}, card
 }
-
-

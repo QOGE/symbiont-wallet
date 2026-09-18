@@ -152,6 +152,15 @@ func (c *Client) GetConnectionCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+// GetBlockCount returns the connected node's fully validated chain-tip height.
+func (c *Client) GetBlockCount(ctx context.Context) (int64, error) {
+	var height int64
+	if err := c.call(ctx, "getblockcount", nil, &height); err != nil {
+		return 0, err
+	}
+	return height, nil
+}
+
 // Ping calls getblockcount — a lightweight liveness check.
 // Returns nil if the node responds, an error otherwise.
 func (c *Client) Ping(ctx context.Context) error {

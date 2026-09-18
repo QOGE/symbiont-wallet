@@ -52,6 +52,48 @@ func TestGetConnectionCountRPCError(t *testing.T) {
 	}
 }
 
+func TestGetBlockCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "user" || password != "password" {
+			t.Error("request did not use existing RPC credentials")
+		}
+		if req.Method != "getblockcount" || len(req.Params) != 0 {
+			t.Errorf("request = %q %v, want getblockcount with no params", req.Method, req.Params)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"result": 2459520, "error": nil, "id": 1}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	client := New(strings.TrimPrefix(server.URL, "http://"), "user", "password")
+	height, err := client.GetBlockCount(context.Background())
+	if err != nil || height != 2459520 {
+		t.Fatalf("GetBlockCount = (%d, %v), want (2459520, nil)", height, err)
+	}
+}
+
+func TestGetBlockCountRPCError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"result": nil, "error": map[string]any{"code": -32603, "message": "node unavailable"}, "id": 1,
+		}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	client := New(strings.TrimPrefix(server.URL, "http://"), "", "")
+	if _, err := client.GetBlockCount(context.Background()); err == nil {
+		t.Fatal("RPC failure was silently treated as block height zero")
+	}
+}
+
 func TestSendRawTransaction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req rpcRequest
