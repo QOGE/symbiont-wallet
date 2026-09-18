@@ -554,7 +554,7 @@ func TestFilterAddressInfos(t *testing.T) {
 		{Address: "retired", State: keystore.StateRetired},
 	}
 
-	visible, hidden := filterAddressInfos(infos, false)
+	visible, hidden := filterAddressInfos(infos, false, false)
 	if hidden != 2 {
 		t.Fatalf("hidden by default = %d, want 2", hidden)
 	}
@@ -568,9 +568,43 @@ func TestFilterAddressInfos(t *testing.T) {
 		}
 	}
 
-	visible, hidden = filterAddressInfos(infos, true)
+	visible, hidden = filterAddressInfos(infos, true, false)
 	if hidden != 0 || len(visible) != len(infos) {
 		t.Fatalf("show all returned %d visible, %d hidden; want %d visible, 0 hidden", len(visible), hidden, len(infos))
+	}
+}
+
+func TestFilterAddressInfosIndependentCheckboxes(t *testing.T) {
+	infos := []wallet.AddressInfo{
+		{Address: "fresh", State: keystore.StateFresh},
+		{Address: "reserved", State: keystore.StateFresh, Reserved: true},
+		{Address: "funded", State: keystore.StateFunded},
+		{Address: "pending", State: keystore.StateSpendPending},
+		{Address: "spent", State: keystore.StateSpent},
+		{Address: "retired", State: keystore.StateRetired},
+	}
+	for _, tc := range []struct {
+		name                        string
+		showSpentRetired, hideFresh bool
+		want                        []string
+		wantHidden                  int
+	}{
+		{"defaults", false, false, []string{"fresh", "reserved", "funded", "pending"}, 2},
+		{"hide fresh", false, true, []string{"funded", "pending"}, 4},
+		{"show historical", true, false, []string{"fresh", "reserved", "funded", "pending", "spent", "retired"}, 0},
+		{"both checked", true, true, []string{"funded", "pending", "spent", "retired"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			visible, hidden := filterAddressInfos(infos, tc.showSpentRetired, tc.hideFresh)
+			if hidden != tc.wantHidden || len(visible) != len(tc.want) {
+				t.Fatalf("visible/hidden = %d/%d, want %d/%d", len(visible), hidden, len(tc.want), tc.wantHidden)
+			}
+			for i, want := range tc.want {
+				if visible[i].Address != want {
+					t.Fatalf("visible[%d] = %q, want %q", i, visible[i].Address, want)
+				}
+			}
+		})
 	}
 }
 
@@ -614,7 +648,7 @@ func TestShowSpentRetiredCheckboxTapTogglesFilter(t *testing.T) {
 	}
 	visibleCount, hiddenCount := 0, 0
 	check := widget.NewCheck("Show spent/retired addresses", func(show bool) {
-		visible, hidden := filterAddressInfos(infos, show)
+		visible, hidden := filterAddressInfos(infos, show, false)
 		visibleCount, hiddenCount = len(visible), hidden
 	})
 
@@ -625,6 +659,29 @@ func TestShowSpentRetiredCheckboxTapTogglesFilter(t *testing.T) {
 	fynetest.Tap(check)
 	if visibleCount != 1 || hiddenCount != 2 {
 		t.Fatalf("after disable tap: visible=%d hidden=%d, want 1/2", visibleCount, hiddenCount)
+	}
+}
+
+func TestHideFreshCheckboxTapTogglesFilter(t *testing.T) {
+	infos := []wallet.AddressInfo{
+		{State: keystore.StateFresh},
+		{State: keystore.StateFresh, Reserved: true},
+		{State: keystore.StateFunded},
+		{State: keystore.StateSpendPending},
+	}
+	visibleCount, hiddenCount := 0, 0
+	check := widget.NewCheck("Hide fresh addresses", func(hide bool) {
+		visible, hidden := filterAddressInfos(infos, false, hide)
+		visibleCount, hiddenCount = len(visible), hidden
+	})
+
+	fynetest.Tap(check)
+	if visibleCount != 2 || hiddenCount != 2 {
+		t.Fatalf("after hide tap: visible=%d hidden=%d, want 2/2", visibleCount, hiddenCount)
+	}
+	fynetest.Tap(check)
+	if visibleCount != 4 || hiddenCount != 0 {
+		t.Fatalf("after show tap: visible=%d hidden=%d, want 4/0", visibleCount, hiddenCount)
 	}
 }
 

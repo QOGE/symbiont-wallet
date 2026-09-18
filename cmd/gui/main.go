@@ -155,11 +155,11 @@ func decodeCreateSeedHex(seedHex string, backupConfirmed bool) ([]byte, error) {
 	return seed, nil
 }
 
-func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired bool) (visible []wallet.AddressInfo, hidden int) {
+func filterAddressInfos(infos []wallet.AddressInfo, showSpentRetired, hideFresh bool) (visible []wallet.AddressInfo, hidden int) {
 	visible = make([]wallet.AddressInfo, 0, len(infos))
 	for _, info := range infos {
 		historical := info.State == keystore.StateSpent || info.State == keystore.StateRetired
-		if historical && !showSpentRetired {
+		if (historical && !showSpentRetired) || (info.State == keystore.StateFresh && hideFresh) {
 			hidden++
 			continue
 		}
@@ -799,12 +799,13 @@ func main() {
 	var lastAddressRender addressRenderState
 	var hasAddressSnapshot bool
 	var showSpentRetired bool
+	var hideFresh bool
 
 	renderAddressList := func() {
 		if !hasAddressSnapshot {
 			return
 		}
-		visible, hidden := filterAddressInfos(lastAddressRender.infos, showSpentRetired)
+		visible, hidden := filterAddressInfos(lastAddressRender.infos, showSpentRetired, hideFresh)
 		addressCountSummary.SetText(fmt.Sprintf("%d", len(lastAddressRender.infos)))
 		if lastAddressRender.balances == nil {
 			spendableSummary.SetText("—")
@@ -907,7 +908,7 @@ func main() {
 
 		summary := fmt.Sprintf("%d address(es)", len(lastAddressRender.infos))
 		if hidden > 0 {
-			summary += fmt.Sprintf(" (%d spent/retired hidden)", hidden)
+			summary += fmt.Sprintf(" (%d hidden by filters)", hidden)
 		}
 		if lastAddressRender.balanceErr != "" {
 			summary += " — " + lastAddressRender.balanceErr
@@ -940,6 +941,10 @@ func main() {
 
 	showSpentRetiredCheck := widget.NewCheck("Show spent/retired addresses", func(show bool) {
 		showSpentRetired = show
+		renderAddressList()
+	})
+	hideFreshCheck := widget.NewCheck("Hide fresh addresses", func(hide bool) {
+		hideFresh = hide
 		renderAddressList()
 	})
 
@@ -1189,7 +1194,7 @@ func main() {
 				pageTitle("My Addresses"),
 				pageIntro("Lifecycle state is shown on each row. Refresh updates balances from the connected node."),
 				addressSummaryCards,
-				container.NewBorder(nil, nil, showSpentRetiredCheck, refreshBtn),
+				container.NewBorder(nil, nil, container.NewHBox(showSpentRetiredCheck, hideFreshCheck), refreshBtn),
 			),
 			container.NewVBox(
 				widget.NewSeparator(),
