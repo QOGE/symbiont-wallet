@@ -10,6 +10,48 @@ import (
 	"testing"
 )
 
+func TestGetConnectionCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "user" || password != "password" {
+			t.Errorf("request did not use existing RPC credentials")
+		}
+		if req.Method != "getconnectioncount" || len(req.Params) != 0 {
+			t.Errorf("request = %q %v, want getconnectioncount with no params", req.Method, req.Params)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"result": 8, "error": nil, "id": 1}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	client := New(strings.TrimPrefix(server.URL, "http://"), "user", "password")
+	count, err := client.GetConnectionCount(context.Background())
+	if err != nil || count != 8 {
+		t.Fatalf("GetConnectionCount = (%d, %v), want (8, nil)", count, err)
+	}
+}
+
+func TestGetConnectionCountRPCError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"result": nil, "error": map[string]any{"code": -32603, "message": "node unavailable"}, "id": 1,
+		}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	client := New(strings.TrimPrefix(server.URL, "http://"), "", "")
+	if _, err := client.GetConnectionCount(context.Background()); err == nil {
+		t.Fatal("RPC failure was silently treated as a peer count")
+	}
+}
+
 func TestSendRawTransaction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req rpcRequest

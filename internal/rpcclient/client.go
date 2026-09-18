@@ -142,6 +142,16 @@ func (c *Client) ScanTxOutSet(ctx context.Context, descriptors []string) (ScanRe
 	return result, nil
 }
 
+// GetConnectionCount returns the connected node's current inbound and outbound
+// peer count. It uses the same authenticated connection as other wallet RPCs.
+func (c *Client) GetConnectionCount(ctx context.Context) (int, error) {
+	var count int
+	if err := c.call(ctx, "getconnectioncount", nil, &count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Ping calls getblockcount — a lightweight liveness check.
 // Returns nil if the node responds, an error otherwise.
 func (c *Client) Ping(ctx context.Context) error {

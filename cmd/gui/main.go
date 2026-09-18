@@ -38,6 +38,7 @@ import (
 const (
 	localMainnetRPCEndpoint = "127.0.0.1:8332"
 	localRPCProbeTimeout    = 2 * time.Second
+	peerCountRPCTimeout     = 5 * time.Second
 	rpcCookieUsername       = "__cookie__"
 	transactionExplorerBase = "https://explorer.qoge.org/tx/"
 )
@@ -604,7 +605,14 @@ func main() {
 	var rpc *rpcclient.Client
 	var tabs *container.AppTabs
 	var addressesTab, transactionsTab, pendingTab, recoveryTab, sendTab *container.TabItem
-	var rpcFooterStatus *widget.Label
+	var rpcFooterStatus, peerCountLabel *widget.Label
+	var peerLookupSeq uint64
+	resetPeerCount := func() {
+		peerLookupSeq++
+		if peerCountLabel != nil {
+			peerCountLabel.SetText("—")
+		}
+	}
 	var renderTransactions func()
 	var renderPending func()
 	var addressesNavBtn, transactionsNavBtn, pendingNavBtn, recoveryNavBtn, sendNavBtn *widget.Button
@@ -734,6 +742,7 @@ func main() {
 			return candidate, nil
 		})
 		if connected && rpcFooterStatus != nil {
+			resetPeerCount()
 			updateRPCStatus(rpcFooterStatus, localMainnetRPCEndpoint, nil)
 		}
 	}
@@ -964,16 +973,19 @@ func main() {
 		pass := rpcPass.Text
 		if ep == "" {
 			rpc = nil
+			resetPeerCount()
 			updateRPCStatus(rpcFooterStatus, "", nil)
 			return
 		}
 		c := rpcclient.New(ep, user, pass)
 		if err := c.Ping(context.Background()); err != nil {
 			rpc = nil
+			resetPeerCount()
 			updateRPCStatus(rpcFooterStatus, "", fmt.Errorf("node unreachable: %w", err))
 			return
 		}
 		rpc = c
+		resetPeerCount()
 		updateRPCStatus(rpcFooterStatus, ep, nil)
 	})
 	connectBtn.Importance = widget.HighImportance
@@ -2224,9 +2236,9 @@ func main() {
 		navItem(walletNavBtn),
 		navItem(addressesNavBtn),
 		navItem(transactionsNavBtn),
+		navItem(sendNavBtn),
 		navItem(pendingNavBtn),
 		navItem(recoveryNavBtn),
-		navItem(sendNavBtn),
 		navItem(networkNavBtn),
 	)
 	themeToggle := container.NewGridWrap(fyne.NewSize(80, 40), themeToggleBtn.Container)
@@ -2236,9 +2248,37 @@ func main() {
 		container.NewPadded(sidebarInner),
 	)
 	sidebarWithTheme := container.NewThemeOverride(sidebarRail, qogeSidebarTheme{Theme: newActiveQogeTheme()})
+	peerCountLabel = widget.NewLabel("—")
+	peerCountBtn := widget.NewButtonWithIcon("Peers", theme.AccountIcon(), func() {
+		if rpc == nil {
+			peerCountLabel.SetText("Not connected")
+			return
+		}
+		client := rpc
+		peerLookupSeq++
+		requestID := peerLookupSeq
+		peerCountLabel.SetText("Checking…")
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), peerCountRPCTimeout)
+			defer cancel()
+			count, err := client.GetConnectionCount(ctx)
+			fyne.Do(func() {
+				if rpc != client || peerLookupSeq != requestID {
+					return
+				}
+				if err != nil {
+					peerCountLabel.SetText("Unavailable")
+					return
+				}
+				peerCountLabel.SetText(fmt.Sprintf("%d", count))
+			})
+		}()
+	})
+	peerCountBtn.Importance = widget.LowImportance
 	footer := container.NewStack(
 		canvas.NewRectangle(qgDisplayBg),
-		container.NewVBox(widget.NewSeparator(), rpcFooterStatus),
+		container.NewVBox(widget.NewSeparator(),
+			container.NewBorder(nil, nil, rpcFooterStatus, container.NewHBox(peerCountBtn, peerCountLabel), nil)),
 	)
 	pageContent := container.New(layout.NewCustomPaddedLayout(12, 12, 16, 16), pageHost)
 	content := container.NewBorder(nil, nil,
