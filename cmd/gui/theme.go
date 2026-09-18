@@ -319,10 +319,10 @@ type qogeSidebarTheme struct {
 
 // addressListSpacing is the gap between My Addresses rows. It is applied only
 // to the address ledger so the rest of the app keeps the global type rhythm.
-const addressListSpacing float32 = 3
+const addressListSpacing float32 = 2
 
 // addressListRightInset pulls the balance/copy cluster off the scroll edge.
-const addressListRightInset float32 = 5
+const addressListRightInset float32 = 15
 
 // addressListTextSize is slightly smaller than the global body size (13).
 const addressListTextSize float32 = 11
@@ -403,7 +403,7 @@ func (t qogeHistoryCardTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNamePadding, theme.SizeNameInnerPadding:
 		return 2
 	case theme.SizeNameCardRadius:
-		return 1
+		return 2
 	}
 	return t.Theme.Size(name)
 }
@@ -461,13 +461,13 @@ func (t *QogeTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNameInputBorder:
 		return 1
 	case theme.SizeNameScrollBar:
-		return 10
+		return 12
 	case theme.SizeNameScrollBarSmall:
-		return 4
+		return 10
 	case theme.SizeNameScrollBarRadius:
 		return 5
 	case theme.SizeNameInlineIcon:
-		return 18
+		return 16
 	}
 
 	return theme.DefaultTheme().Size(name)
